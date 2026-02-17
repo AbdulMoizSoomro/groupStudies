@@ -1,0 +1,43 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs / runtime output
+*.log
+*.out
+*.pid
+gnb.log
+ue.log
+
+# Python / Node / generic caches
+__pycache__/
+*.pyc
+node_modules/
+.cache/
+
+# Build artifacts
+build/
+dist/
+out/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Ignore heavy upstream source trees in this integration repo
+open5gs/
+oran-sc-ric/
+srsRAN_4G/
+srsRAN_Project/
