@@ -7,6 +7,8 @@ This document provides a full, practical, end-to-end setup for:
 - Open5GS 5G Core (from source)
 - O-RAN SC Near-RT RIC (docker compose)
 - srsRAN gNB + srsUE using ZeroMQ (no RF hardware)
+- USRP + COTS UE path (hardware option)
+- KPIMON xApp lifecycle
 - End-to-end UE PDU session and ping validation
 
 It also includes the common failure cases and exact fixes.
@@ -52,6 +54,23 @@ test -x srsRAN_4G/build/srsue/src/srsue && echo "srsue ok"
 
 # MongoDB
 systemctl is-active mongod
+```
+
+Recommended host packages (Ubuntu):
+
+```bash
+sudo apt update
+sudo apt install -y git curl wget cmake make gcc g++ pkg-config meson ninja-build \
+  libsctp-dev lksctp-tools libyaml-cpp-dev libzmq3-dev libfftw3-dev libmbedtls-dev \
+  libgmp-dev libusb-1.0-0-dev mongodb-clients iproute2 iptables docker.io docker-compose-plugin
+```
+
+Docker prerequisites:
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+# log out/in once after group update
 ```
 
 ---
@@ -116,6 +135,21 @@ bash "$DBCTL" add_ue_with_apn \
 
 bash "$DBCTL" showpretty | sed -n '/001010000000101/,+40p'
 ```
+
+### 4.6 Optional: Open5GS WebUI
+
+```bash
+cd /home/abdul-moiz-soomro/prj/group_studies/open5gs/webui
+npm ci
+npm run build
+npm run dev
+```
+
+Open WebUI and verify subscriber fields:
+- IMSI `001010000000101`
+- Ki `0C0A34601D4F07677303652C0462535B`
+- OPc `63BFA50EE6523365FF14C1F45F88737B`
+- APN/DNN `internet`
 
 ---
 
@@ -250,7 +284,88 @@ cmake --build build -j"$(nproc)"
 
 ---
 
-## 9) Common Problems and Fixes
+## 9) Option 2 (USRP + COTS UE)
+
+Use this only when moving from ZMQ emulation to RF hardware.
+
+### 9.1 UHD + RF dependencies
+
+```bash
+sudo apt-get install -y libuhd-dev uhd-host
+sudo uhd_images_downloader
+uhd_find_devices
+
+sudo apt-get install -y \
+  libpcsclite-dev libbladerf-dev soapysdr-module-all libsctp-dev doxygen \
+  libdwarf-dev libelf-dev binutils-dev libdw-dev libmbedtls-dev libyaml-cpp-dev \
+  lksctp-tools libconfig++-dev
+```
+
+### 9.2 gNB RF config
+
+Use hardware-specific config (for example):
+- `srsRAN_Project/configs/gnb_rf_b200_tdd_n78_20mhz.yml`
+
+Run:
+
+```bash
+cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
+sudo ./gnb -c gnb_rf_b200_tdd_n78_20mhz.yml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+```
+
+### 9.3 COTS UE checks
+
+- SIM uses PLMN `00101`
+- APN `internet`
+- Device supports private PLMN
+- Confirm UE receives IP from `10.45.0.0/16` pool and passes UL/DL traffic
+
+---
+
+## 10) KPIMON xApp (Near-RT RIC)
+
+Reference integration path follows srsRAN Near-RT RIC tutorial.
+
+From `oran-sc-ric`:
+
+```bash
+cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+docker compose up -d
+docker compose exec python_xapp_runner ./kpm_mon_xapp.py
+```
+
+If xApp code or Dockerfile dependencies change:
+
+```bash
+docker compose build --no-cache python_xapp_runner
+docker compose up -d python_xapp_runner
+docker compose exec python_xapp_runner ./kpm_mon_xapp.py
+```
+
+---
+
+## 11) Recommended Startup / Shutdown Order
+
+### Startup
+1. MongoDB
+2. Open5GS (`5gc`)
+3. RIC (`docker compose up`)
+4. gNB
+5. UE
+6. KPI xApp (optional)
+
+### Shutdown
+1. UE
+2. gNB
+3. xApp containers (optional)
+4. RIC stack
+5. Open5GS
+
+This order prevents stale sockets/sessions and reduces `Address already in use` errors.
+
+---
+
+## 12) Common Problems and Fixes
 
 ### A) `Attaching UE...` appears stuck
 
@@ -324,9 +439,52 @@ ip -brief addr show ogstun
 sudo iptables -S FORWARD | grep ogstun
 ```
 
+### H) UE attaches then drops quickly
+
+**Cause**:
+- gNB/UE restarted out-of-order
+- stale `ue1` namespace from older session
+
+**Fix**:
+```bash
+sudo ip netns del ue1 2>/dev/null || true
+sudo ip netns add ue1
+```
+Restart gNB first, then UE.
+
+### I) RIC E2 connect fails
+
+**Cause**:
+- RIC containers not healthy
+- gNB E2 endpoint (`--addr`) mismatched to container network
+
+**Fix**:
+```bash
+docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-compose.yml \
+  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric ps
+```
+Then verify `gNB` uses reachable RIC address/port (`36421`).
+
+### J) `Unknown UE by SUCI` appears in AMF log
+
+**Explanation**:
+- This can be a normal first step before identity resolution.
+
+**Action**:
+- Not fatal if followed by `Registration complete` and session creation logs.
+
+### K) Loopback alias missing for older configs (10.53.1.x)
+
+Only needed if your gNB config still references `10.53.1.1/10.53.1.2`.
+
+```bash
+sudo ip addr add 10.53.1.1/24 dev lo || true
+sudo ip addr add 10.53.1.2/24 dev lo || true
+```
+
 ---
 
-## 10) Log Locations and High-Value Greps
+## 13) Log Locations and High-Value Greps
 
 - gNB: `/home/abdul-moiz-soomro/prj/group_studies/gnb.log`
 - UE: `/home/abdul-moiz-soomro/prj/group_studies/ue.log`
@@ -342,7 +500,7 @@ grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|
 
 ---
 
-## 11) Final Success Criteria
+## 14) Final Success Criteria
 
 System is considered E2E healthy when all are true:
 
@@ -354,10 +512,37 @@ System is considered E2E healthy when all are true:
 
 ---
 
-## 12) Notes About Privileges
+## 15) Notes About Privileges
 
 - `sudo` is required for:
   - `ip netns` operations
   - srsUE GW setup
   - TUN/iptables setup
 - Non-root runs may look partially healthy but fail at netns/GW stage.
+
+---
+
+## 16) Quick Daily Re-Run (Minimal Commands)
+
+```bash
+# Terminal A
+cd /home/abdul-moiz-soomro/prj/group_studies/open5gs
+./build/tests/app/5gc
+
+# Terminal B
+cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+docker compose up
+
+# Terminal C
+cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
+./gnb -c gnb_zmq.yaml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+
+# Terminal D
+sudo ip netns del ue1 2>/dev/null || true
+sudo ip netns add ue1
+sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/srsue/src/srsue \
+  /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/build/srsue/src/ue_zmq.conf
+
+# Terminal E
+sudo ip netns exec ue1 ping -c 5 10.45.0.1
+```
