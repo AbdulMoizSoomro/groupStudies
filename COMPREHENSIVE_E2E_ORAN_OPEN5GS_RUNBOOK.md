@@ -195,9 +195,8 @@ Expected up containers include: `ric_dbaas`, `ric_e2term`, `ric_e2mgr`, `ric_sub
 - Tracking area + cell:
   - `plmn: "00101"`
   - `tac: 7`
-- `e2.addr: 127.0.0.1` (RIC local path)
-- Launch cmd E2 endpoint:
-  - `e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"`
+- `e2.addr: 127.0.0.1` in YAML is ignored when CLI `e2 --addr ...` is passed
+- Use runtime-discovered RIC `e2term` container IP (recommended after interface changes)
 
 ### 6.2 UE config (`ue_zmq.conf`) required values
 
@@ -216,9 +215,17 @@ Terminal 1 (gNB):
 sudo pkill -9 -f srsue || true
 sudo pkill -9 -f '/build/apps/gnb/gnb' || true
 
-/home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb/gnb \
+# Ensure RIC E2 services are up
+cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+docker compose up -d e2term e2mgr rtmgr_sim
+
+# Discover current E2TERM IP on docker bridge (changes across restarts/interface updates)
+E2_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term)
+echo "Using E2_IP=$E2_IP"
+
+sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb/gnb \
   -c /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb/gnb_zmq.yaml \
-  e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+  e2 --addr="$E2_IP" --bind_addr="10.0.2.1"
 ```
 
 Terminal 2 (UE):
@@ -465,6 +472,15 @@ docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-c
 ```
 Then verify `gNB` uses reachable RIC address/port (`36421`).
 
+If VM interfaces changed or docker networks were recreated, do not hardcode `10.0.2.10`.
+Use:
+
+```bash
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term
+```
+
+Then pass that value in gNB launch: `e2 --addr="<ric_e2term_ip>" --bind_addr="10.0.2.1"`.
+
 ### J) `Unknown UE by SUCI` appears in AMF log
 
 **Explanation**:
@@ -535,7 +551,8 @@ docker compose up
 
 # Terminal C
 cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
-./gnb -c gnb_zmq.yaml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+E2_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term)
+sudo ./gnb -c gnb_zmq.yaml e2 --addr="$E2_IP" --bind_addr="10.0.2.1"
 
 # Terminal D
 sudo ip netns del ue1 2>/dev/null || true
