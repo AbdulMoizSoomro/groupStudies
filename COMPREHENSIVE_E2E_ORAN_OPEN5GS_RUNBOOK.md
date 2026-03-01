@@ -171,7 +171,7 @@ If your guideline provides a custom compose, replace:
 
 ```bash
 docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-compose.yml \
-  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric up
+  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric up -d 
 ```
 
 Check status:
@@ -245,7 +245,7 @@ Expected UE lines:
 
 ---
 
-## 7) End-to-End Validation (UE to Core)
+## 7) End-to-End Validation (UE to Core + Internet)
 
 Terminal 3:
 
@@ -259,6 +259,33 @@ Expected:
 - `tun_srsue` has IP (e.g. `10.45.0.x`)
 - Route via `tun_srsue`
 - Ping `0% packet loss`
+
+### 7.1 Internet reachability test (per srsRAN Near-RT RIC tutorial troubleshooting)
+
+If UE-to-core ping works but Internet ping fails, apply host forwarding/NAT and retest from `ue1`:
+
+```bash
+# Ensure UE has default route
+sudo ip netns exec ue1 ip route add default via 10.45.0.1 dev tun_srsue 2>/dev/null || true
+
+# Enable forwarding and NAT on host egress interface
+OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || \
+  sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
+
+# Required when host FORWARD policy is DROP (common with Kubernetes/docker hosts)
+sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# Internet test from UE namespace
+sudo ip netns exec ue1 ping -c 5 8.8.8.8
+```
+
+Expected:
+- `8.8.8.8` ping from `ue1` returns `0% packet loss`.
 
 ---
 
@@ -446,6 +473,30 @@ ip -brief addr show ogstun
 sudo iptables -S FORWARD | grep ogstun
 ```
 
+If this still fails, run the full Internet troubleshooting sequence:
+
+```bash
+OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || \
+  sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
+sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo ip netns exec ue1 ping -c 5 8.8.8.8
+```
+
+In this workspace, root cause was host `FORWARD` policy set to `DROP`; explicit `ogstun <-> $OUT_IFACE` rules solved it.
+
+Also verify there is no route conflict caused by a second Open5GS instance:
+
+```bash
+ip route | grep -E '^10.45.0.0/16'
+```
+
+If route points to an unintended interface/service, disable the conflicting instance or bring `ogstun` down in that other setup.
+
 ### H) UE attaches then drops quickly
 
 **Cause**:
@@ -525,6 +576,7 @@ System is considered E2E healthy when all are true:
 3. gNB shows AMF and E2 connections established.
 4. UE shows `PDU Session Establishment successful`.
 5. `sudo ip netns exec ue1 ping -c 5 10.45.0.1` returns `0% packet loss`.
+6. `sudo ip netns exec ue1 ping -c 5 8.8.8.8` returns `0% packet loss`.
 
 ---
 
@@ -562,4 +614,12 @@ sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/srsue/src/srsue \
 
 # Terminal E
 sudo ip netns exec ue1 ping -c 5 10.45.0.1
+
+# Terminal F (optional Internet validation)
+OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
+sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo ip netns exec ue1 ping -c 5 8.8.8.8
 ```
