@@ -16,6 +16,10 @@ ue.log
 # Python / Node / generic caches
 __pycache__/
 *.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
 node_modules/
 .cache/
 
