@@ -1,0 +1,9 @@
+PyYAML>=6.0
+requests>=2.31.0
+
+# Optional: HTTP server mode (--server flag)
+Flask>=2.0.0
+
+# Optional: high-performance libuv bindings (used by some async frameworks)
+# the package is small and harmless even if unused, but some users requested it
+uv>=0.10.7
