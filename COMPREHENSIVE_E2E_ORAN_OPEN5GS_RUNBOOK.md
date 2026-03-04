@@ -281,10 +281,16 @@ sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATE
   sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # Internet test from UE namespace
+if command -v traceroute >/dev/null 2>&1; then
+  sudo ip netns exec ue1 traceroute -n -m 5 8.8.8.8
+else
+  sudo ip netns exec ue1 tracepath -n 8.8.8.8
+fi
 sudo ip netns exec ue1 ping -c 5 8.8.8.8
 ```
 
 Expected:
+- First hop is `10.45.0.1` (Open5GS `ogstun` gateway) in traceroute/tracepath output
 - `8.8.8.8` ping from `ue1` returns `0% packet loss`.
 
 ---
@@ -576,7 +582,8 @@ System is considered E2E healthy when all are true:
 3. gNB shows AMF and E2 connections established.
 4. UE shows `PDU Session Establishment successful`.
 5. `sudo ip netns exec ue1 ping -c 5 10.45.0.1` returns `0% packet loss`.
-6. `sudo ip netns exec ue1 ping -c 5 8.8.8.8` returns `0% packet loss`.
+6. Traceroute path check (`traceroute` if available, otherwise `tracepath`) shows first hop `10.45.0.1`.
+7. `sudo ip netns exec ue1 ping -c 5 8.8.8.8` returns `0% packet loss`.
 
 ---
 
@@ -599,7 +606,7 @@ cd /home/abdul-moiz-soomro/prj/group_studies/open5gs
 
 # Terminal B
 cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
-docker compose up
+docker compose up -d
 
 # Terminal C
 cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
@@ -621,5 +628,10 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
 sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
 sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+if command -v traceroute >/dev/null 2>&1; then
+  sudo ip netns exec ue1 traceroute -n -m 5 8.8.8.8
+else
+  sudo ip netns exec ue1 tracepath -n 8.8.8.8
+fi
 sudo ip netns exec ue1 ping -c 5 8.8.8.8
 ```
