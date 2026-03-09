@@ -94,6 +94,7 @@ If any one of these differs, attach can fail (often as authentication reject or 
 
 ---
 
+```markdown
 ## 3) Pre-checks
 
 From workspace root:
@@ -108,23 +109,67 @@ test -x srsRAN_4G/build/srsue/src/srsue && echo "srsue ok"
 
 # MongoDB
 systemctl is-active mongod
+
 ```
 
-Recommended host packages (Ubuntu):
+### 3.1) Recommended Host Packages (Ubuntu)
+
+Install standard development and networking tools from the default Ubuntu repositories:
 
 ```bash
 sudo apt update
 sudo apt install -y git curl wget cmake make gcc g++ pkg-config meson ninja-build \
-  libsctp-dev lksctp-tools libyaml-cpp-dev libzmq3-dev libfftw3-dev libmbedtls-dev \
-  libgmp-dev libusb-1.0-0-dev mongodb-clients iproute2 iptables docker.io docker-compose-plugin
+  libsctp-dev lksctp-tools libyaml-cpp-dev libzmq3-dev libfftw3-dev libmbedtls-dev \
+  libgmp-dev libusb-1.0-0-dev iproute2 iptables gnupg lsb-release ca-certificates
+
 ```
 
-Docker prerequisites:
+### 3.2) Install Docker & Docker Compose v2
+
+Because `docker-compose-plugin` is often missing or outdated in default repositories, install it via the official Docker repository:
+
+```bash
+# Add Docker's official GPG key and repo
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL [https://download.docker.com/linux/ubuntu/gpg](https://download.docker.com/linux/ubuntu/gpg) -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] [https://download.docker.com/linux/ubuntu](https://download.docker.com/linux/ubuntu) \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+```
+
+### 3.3) Install MongoDB Clients
+
+The `mongodb-clients` package has been removed from newer Ubuntu default repositories. Add the official MongoDB repository to install the necessary tools:
+
+```bash
+# Add MongoDB official GPG key and repo (Configured for MongoDB 7.0)
+curl -fsSL [https://www.mongodb.org/static/pgp/server-7.0.asc](https://www.mongodb.org/static/pgp/server-7.0.asc) | \
+   sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] [https://repo.mongodb.org/apt/ubuntu](https://repo.mongodb.org/apt/ubuntu) \
+  $(. /etc/os-release && echo "$VERSION_CODENAME")/mongodb-org/7.0 multiverse" | \
+  sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+sudo apt update
+sudo apt install -y mongodb-org-tools mongodb-mongosh
+
+```
+
+### 3.4) Docker Prerequisites
+
+Ensure the Docker daemon is running and your user has the correct permissions:
 
 ```bash
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
-# log out/in once after group update
+# IMPORTANT: Log out and log back in (or close/reopen your terminal) to apply group updates.
+
 ```
 
 ---
