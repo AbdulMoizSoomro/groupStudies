@@ -1,0 +1,130 @@
+
+End-to-End 5G O-RAN Network Setup Guide
+
+Author: M.Sc Manasik Hassan
+Date: 2025-07-24
+Version: 3.0.0
+
+To set up an E2E 5G O-RAN network, the following components must be installed in the specified order:
+
+1. Open5GS Core
+You can set up the Open5GS core either from source or as a containerized version using Docker. Building it from source offers more flexibility, especially when working with multiple gNBs, UEs, and setting up a distributed E2E O-RAN network across different machines.
+
+Follow the detailed instructions provided below: 
+https://open5gs.org/open5gs/docs/guide/02-building-open5gs-from-sources/
+
+key steps include:
+1.	Install MongoDB
+2.	Configure the TUN device
+3.	Build Open5GS from source: Make sure to pull the latest version of open5gs source code from GitHub
+4.	Configuration:
+	Replace the default sample.yaml file located in open5gs/build/configs/ with the one provided with this guideline. 
+	Execute the following command from the Open5GS directory to run the core: $ ./build/tests/app/5gc
+5.	Add a route to enable UE WAN connectivity. Add the following commands as well for enabling DL Traffic to UE:
+	$ sudo iptables -I FORWARD -i ogstun -j ACCEPT
+	$ sudo iptables -I FORWARD -o ogstun -j ACCEPT
+
+6.	Build the WebUI for Open5GS to manage subscribers
+
+7.	Register subscriber Information: 
+Use the WebUI to add a subscriber. The following details are for a single UE:
+	IMSI: 001010000000101
+	Ki: 0C0A34601D4F07677303652C0462535B
+	Opc: 63BFA50EE6523365FF14C1F45F88737B
+	APN: internet
+
+2. O-RAN OSC Near RT RIC
+
+1.	Clone the repository:
+$ git clone https://github.com/srsran/oran-sc-ric
+$ cd ./oran-sc-ric
+
+2.	Replace the default docker-compose.yml file located in oran-sc-ric/ directory with the version provided with this guideline.
+
+3.	Start the RIC:
+$ docker compose up
+
+
+3. gNB
+
+You can configure the gNB using one of two methods:
+
+Option 1: Using srsgNB and srsUE (No Hardware Required)
+This method supports a single point to point gNB-UE connection. For multiple UEs, additional configuration using GNU Radio is required to enable ZeroMQ for multi-point communication.
+
+1.	Follow the instruction provided below for building the srsRAN project with ZeroMQ libraries: 
+https://docs.srsran.com/projects/project/en/latest/tutorials/source/near-rt-ric/source/index.html
+
+$ cd build/apps/gnb
+$ sudo ./gnb -c gnb_zmq.yaml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+
+2.	If some problems arise when building the srsRAN_Project, please use the following commands: 
+$ git clone https://github.com/srsran/srsRAN_Project.git
+$ cd srsRAN_Project
+$ mkdir build
+$ cd build
+$ cmake ../ -DENABLE_EXPORT=ON -DENABLE_ZEROMQ=ON -DAUTO_DETECT_ISA=OFF
+$ make -j`nproc`
+
+3.	Some issues might appear for Ubuntu 24.04 when trying to build srsRAN_4G project, here is the full set of commands to download the project and compile it instead:
+$ sudo apt install gcc-11 g++-11
+$ git clone https://github.com/srsRAN/srsRAN_4G.git
+$ cd srsRAN_4G
+$ mkdir build && cd build
+$ export CC=$(which gcc-11)
+$ export CXX=$(which g++-11)
+$ cmake ../ -B build
+$ cmake --build build -j$(nproc)
+
+4.	Configure srsUE: 
+	Copy the ue_zmq.conf file provided with this guideline to the /srsRAN_4G/build/build/srsue/src directory
+
+	Run the srsUE with the following command:
+$ sudo ip netns add ue1
+$ sudo ./srsue ue_zmq.conf  
+
+	Ping from UE to core:
+$ sudo ip netns exec ue1 ping -i 0.1 10.45.0.1
+
+
+Option 2: Using USRPs and Commercial Off-The-Shelf (COTS) UEs
+1.	Set Up USRP Drivers:
+	Before connecting the USRP device, install the required drivers:
+$ sudo apt-get install libuhd-dev uhd-host
+
+	Connect the USRP device via USB 3.0, then run:
+$ sudo uhd_images_downloader
+$ uhd_find_devices
+
+2.	Missing Libraries:
+$ sudo apt-get install libpcsclite-dev libbladerf-dev soapysdr-module-all libsctp-dev libuhd-dev doxygen libdwarf-dev libelf-dev binutils-dev libdw-dev libmbedtls-dev libyaml-cpp-dev lksctp-tools libsctp-dev libconfig++-dev
+
+3.	Configure the gNB:
+
+	Follow the instructions provided here: https://docs.srsran.com/projects/project/en/latest/tutorials/source/near-rt-ric/source/index.html
+
+	Copy the gnb_rf_b200_tdd_n78_20mhz.yml configuration file provided with this guideline to the following directory ./srsRAN_Project/build/apps/gnb/
+
+	Run the gNB with the following command:
+$ cd ./srsRAN_Project/build/apps/gnb/
+$ sudo ./gnb -c gnb_rf_b200_tdd_n78_20mhz.yml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
+
+
+4. COTS UE
+Insert a SIM card with PLMN ID 00101 into a 5G-compatible phone that supports private network PLMN IDs
+Make sure internet apn is selected and enabled
+Turn on the device and verify its connection to the core. Ensure UL/DL traffic.
+
+5. KPIMON xApp
+Follow the xApp installation and setup guidelines available here: https://docs.srsran.com/projects/project/en/latest/tutorials/source/near-rt-ric/source/index.html
+
+NOTE:
+If any changes are made to the xApp, such as adding libraries to the python_xapp_runner docker file or making other updates, a new docker image must be built:
+$ docker compose build --no-cache python_xapp_runner
+$ docker compose up -d python_xapp_runner
+$ docker compose exec python_xapp_runner ./kpm_mon_xapp.py
+
+This will enable KPI monitoring for the O-RAN network
+
+
+
