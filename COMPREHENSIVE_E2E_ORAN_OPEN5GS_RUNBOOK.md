@@ -1,7 +1,9 @@
 # Comprehensive E2E O-RAN + Open5GS Runbook (Validated in This Workspace)
 
-Date: 2026-02-13  
-Workspace: `/home/abdul-moiz-soomro/prj/group_studies`
+Date: 2026-03-09  
+Workspace: `/home/testing/prj`
+
+Dynamic mode: export once, then reuse `"$WS"`-based commands in all sections.
 
 This document provides a full, practical, end-to-end setup for:
 - Open5GS 5G Core (from source)
@@ -25,16 +27,68 @@ It also includes the common failure cases and exact fixes.
 
 ---
 
+## 1.1) Dynamic Runtime Variables (Copy Once Per Shell)
+
+Use this block in each terminal before running commands. It removes hardcoded paths and lets you switch subscriber profile quickly.
+
+```bash
+# Workspace root. Override if needed.
+export WS="${WS:-$PWD}"
+
+# Optional explicit roots (auto-derived from WS).
+export OPEN5GS_ROOT="${OPEN5GS_ROOT:-$WS/open5gs}"
+export RIC_ROOT="${RIC_ROOT:-$WS/oran-sc-ric}"
+export GNB_ROOT="${GNB_ROOT:-$WS/srsRAN_Project}"
+export UE_ROOT="${UE_ROOT:-$WS/srsRAN_4G}"
+
+# Networking/runtime parameters.
+export OGS_TUN="${OGS_TUN:-ogstun}"
+export UE_NS="${UE_NS:-ue1}"
+export GNB_BIND_ADDR="${GNB_BIND_ADDR:-10.0.2.1}"
+export CORE_GW_IP="${CORE_GW_IP:-10.45.0.1}"
+
+# Select subscriber profile: A (default) or B.
+export PROFILE="${PROFILE:-B}"
+if [ "$PROFILE" = "B" ]; then
+  export IMSI="001010123456780"
+  export KI="00112233445566778899aabbccddeeff"
+  export OPC="63BFA50EE6523365FF14C1F45F88737D"
+  export APN="srsapn"
+else
+  export IMSI="001010000000101"
+  export KI="0C0A34601D4F07677303652C0462535B"
+  export OPC="63BFA50EE6523365FF14C1F45F88737B"
+  export APN="internet"
+fi
+
+# Dynamic values discovered at runtime.
+export E2_IP="${E2_IP:-$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term 2>/dev/null || true)}"
+export OUT_IFACE="${OUT_IFACE:-$(ip route show default | awk '{print $5; exit}')}"
+
+printf 'WS=%s\nPROFILE=%s IMSI=%s APN=%s\nE2_IP=%s OUT_IFACE=%s\n' \
+  "$WS" "$PROFILE" "$IMSI" "$APN" "$E2_IP" "$OUT_IFACE"
+```
+
+---
+
 ## 2) Known Good Identity/Session Values
 
-Use these values consistently across Open5GS, gNB, UE, and subscriber DB:
+Use one profile consistently across Open5GS, gNB, UE, and subscriber DB.
 
 - PLMN: `00101`
 - TAC: `7`
+
+Profile A (default):
 - IMSI: `001010000000101`
 - Ki: `0C0A34601D4F07677303652C0462535B`
 - OPc: `63BFA50EE6523365FF14C1F45F88737B`
 - APN/DNN: `internet`
+
+Profile B (legacy, also validated in this workspace):
+- IMSI: `001010123456780`
+- Ki: `00112233445566778899aabbccddeeff`
+- OPc: `63BFA50EE6523365FF14C1F45F88737D`
+- APN/DNN: `srsapn`
 
 If any one of these differs, attach can fail (often as authentication reject or no PDU session).
 
@@ -45,7 +99,7 @@ If any one of these differs, attach can fail (often as authentication reject or 
 From workspace root:
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies
+cd "$WS"
 
 # Binaries
 test -x open5gs/build/tests/app/5gc && echo "open5gs ok"
@@ -82,7 +136,7 @@ Reference: https://open5gs.org/open5gs/docs/guide/02-building-open5gs-from-sourc
 ### 4.1 Build/update
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/open5gs
+cd "$OPEN5GS_ROOT"
 git pull --ff-only
 meson setup build --prefix="$(pwd)/install" --reconfigure
 ninja -C build
@@ -100,46 +154,78 @@ Required values:
 ### 4.3 Bring up tunnel + forwarding (sudo)
 
 ```bash
-sudo ip tuntap add name ogstun mode tun || true
-sudo ip addr add 10.45.0.1/16 dev ogstun || true
-sudo ip link set ogstun up
-sudo iptables -I FORWARD -i ogstun -j ACCEPT
-sudo iptables -I FORWARD -o ogstun -j ACCEPT
+sudo ip tuntap add name "$OGS_TUN" mode tun || true
+sudo ip addr add "$CORE_GW_IP"/16 dev "$OGS_TUN" || true
+sudo ip link set "$OGS_TUN" up
+sudo iptables -I FORWARD -i "$OGS_TUN" -j ACCEPT
+sudo iptables -I FORWARD -o "$OGS_TUN" -j ACCEPT
 ```
 
 ### 4.4 Start core
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/open5gs
+cd "$OPEN5GS_ROOT"
 ./build/tests/app/5gc
 ```
 
 If restarting often, avoid duplicate instances:
 
 ```bash
-pkill -f 'open5gs-(nrfd|scpd|amfd|smfd|upfd|ausfd|udmd|udrd|pcfd|nssfd|bsfd)' || true
-pkill -f '/open5gs/build/tests/app/5gc' || true
+sudo pkill -f 'open5gs-(nrfd|scpd|amfd|smfd|upfd|ausfd|udmd|udrd|pcfd|nssfd|bsfd)' || true
+sudo pkill -f '/open5gs/build/tests/app/5gc' || true
+```
+
+### 4.4.1 Crash-safe test runner (recommended after host crash)
+
+When the host crashes, Open5GS tests can fail repeatedly due to stale sockets or
+UPF failing to open `/dev/net/tun` without privileges. Use the helper below to
+force cleanup, re-create `ogstun`, and run tests with `sudo`:
+
+```bash
+cd "$WS"
+./groupStudies/scripts/open5gs_recover_and_test.sh "$OPEN5GS_ROOT"
+```
+
+Run one test only (example):
+
+```bash
+cd "$WS"
+./groupStudies/scripts/open5gs_recover_and_test.sh "$OPEN5GS_ROOT" registration
 ```
 
 ### 4.5 Provision subscriber in MongoDB
 
 ```bash
-DBCTL=/home/abdul-moiz-soomro/prj/group_studies/open5gs/build/misc/db/open5gs-dbctl
+DBCTL="$OPEN5GS_ROOT/build/misc/db/open5gs-dbctl"
 
-bash "$DBCTL" remove 001010000000101 || true
+bash "$DBCTL" remove "$IMSI" || true
 bash "$DBCTL" add_ue_with_apn \
-  001010000000101 \
-  0C0A34601D4F07677303652C0462535B \
-  63BFA50EE6523365FF14C1F45F88737B \
-  internet
+  "$IMSI" \
+  "$KI" \
+  "$OPC" \
+  "$APN"
 
-bash "$DBCTL" showpretty | sed -n '/001010000000101/,+40p'
+bash "$DBCTL" showpretty | sed -n "/$IMSI/,+40p"
+```
+
+Optional: keep the legacy profile alongside default (useful when switching UE configs):
+
+```bash
+DBCTL="$OPEN5GS_ROOT/build/misc/db/open5gs-dbctl"
+bash "$DBCTL" remove 001010123456780 || true
+bash "$DBCTL" add_ue_with_apn \
+  001010123456780 \
+  00112233445566778899aabbccddeeff \
+  63BFA50EE6523365FF14C1F45F88737D \
+  srsapn
+
+bash "$DBCTL" showfiltered
 ```
 
 ### 4.6 Optional: Open5GS WebUI
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/open5gs/webui
+cd "$OPEN5GS_ROOT/webui"
 npm ci
 npm run build
 npm run dev
@@ -158,7 +244,7 @@ Open WebUI and verify subscriber fields:
 ### 5.1 Repo
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+cd "$RIC_ROOT"
 git pull --ff-only
 ```
 
@@ -170,15 +256,15 @@ If your guideline provides a custom compose, replace:
 ### 5.3 Start RIC
 
 ```bash
-docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-compose.yml \
-  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric up -d 
+docker compose -f "$RIC_ROOT/docker-compose.yml" \
+  --project-directory "$RIC_ROOT" up -d
 ```
 
 Check status:
 
 ```bash
-docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-compose.yml \
-  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric ps
+docker compose -f "$RIC_ROOT/docker-compose.yml" \
+  --project-directory "$RIC_ROOT" ps
 ```
 
 Expected up containers include: `ric_dbaas`, `ric_e2term`, `ric_e2mgr`, `ric_submgr`, `ric_appmgr`, `ric_rtmgr_sim`.
@@ -200,12 +286,11 @@ Expected up containers include: `ric_dbaas`, `ric_e2term`, `ric_e2mgr`, `ric_sub
 
 ### 6.2 UE config (`ue_zmq.conf`) required values
 
-- `[usim]`
-  - `imsi = 001010000000101`
-  - `k = 0C0A34601D4F07677303652C0462535B`
-  - `opc = 63BFA50EE6523365FF14C1F45F88737B`
-- `[nas] apn = internet`
+- `[usim]` must match one DB profile exactly
+- `[nas] apn` must match that same profile exactly (`internet` or `srsapn`)
 - `[gw] netns = ue1`
+
+Validated status (2026-03-09): UE reaches `Attaching UE...` with aligned DB/UE profile.
 
 ### 6.3 Start order (important)
 
@@ -216,26 +301,31 @@ sudo pkill -9 -f srsue || true
 sudo pkill -9 -f '/build/apps/gnb/gnb' || true
 
 # Ensure RIC E2 services are up
-cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+cd "$RIC_ROOT"
 docker compose up -d e2term e2mgr rtmgr_sim
 
 # Discover current E2TERM IP on docker bridge (changes across restarts/interface updates)
 E2_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term)
 echo "Using E2_IP=$E2_IP"
 
-sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb/gnb \
-  -c /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb/gnb_zmq.yaml \
-  e2 --addr="$E2_IP" --bind_addr="10.0.2.1"
+sudo "$GNB_ROOT/build/apps/gnb/gnb" \
+  -c "groupStudies/gnb_zmq.yaml" \
+  log --all_level=info --e2ap_level=debug --ngap_level=info \
+  e2 --enable_du_e2=true --enable_cu_cp_e2=true --enable_cu_up_e2=true \
+     --e2sm_kpm_enabled=true --e2sm_rc_enabled=true \
+     --addr="$E2_IP" --port=36421 --bind_addr="$GNB_BIND_ADDR"
 ```
+
+Validated note (2026-03-09): in this workspace, RIC SCTP association was established only after explicitly enabling all E2 agents (`DU`, `CU-CP`, `CU-UP`) on the gNB CLI.
 
 Terminal 2 (UE):
 
 ```bash
-sudo ip netns del ue1 2>/dev/null || true
-sudo ip netns add ue1
+sudo ip netns del "$UE_NS" 2>/dev/null || true
+sudo ip netns add "$UE_NS"
 
-sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/srsue/src/srsue \
-  /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/build/srsue/src/ue_zmq.conf
+sudo "./$UE_ROOT/build/srsue/src/srsue" \
+  "./groupStudies/ue_zmq.conf"
 ```
 
 Expected UE lines:
@@ -250,9 +340,9 @@ Expected UE lines:
 Terminal 3:
 
 ```bash
-sudo ip netns exec ue1 ip -brief addr
-sudo ip netns exec ue1 ip route
-sudo ip netns exec ue1 ping -c 5 10.45.0.1
+sudo ip netns exec "$UE_NS" ip -brief addr
+sudo ip netns exec "$UE_NS" ip route
+sudo ip netns exec "$UE_NS" ping -c 5 "$CORE_GW_IP"
 ```
 
 Expected:
@@ -266,7 +356,7 @@ If UE-to-core ping works but Internet ping fails, apply host forwarding/NAT and 
 
 ```bash
 # Ensure UE has default route
-sudo ip netns exec ue1 ip route add default via 10.45.0.1 dev tun_srsue 2>/dev/null || true
+sudo ip netns exec "$UE_NS" ip route add default via "$CORE_GW_IP" dev tun_srsue 2>/dev/null || true
 
 # Enable forwarding and NAT on host egress interface
 OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
@@ -275,18 +365,18 @@ sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null ||
   sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
 
 # Required when host FORWARD policy is DROP (common with Kubernetes/docker hosts)
-sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
-  sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
-sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -C FORWARD -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 # Internet test from UE namespace
 if command -v traceroute >/dev/null 2>&1; then
-  sudo ip netns exec ue1 traceroute -n -m 5 8.8.8.8
+  sudo ip netns exec "$UE_NS" traceroute -n -m 5 8.8.8.8
 else
-  sudo ip netns exec ue1 tracepath -n 8.8.8.8
+  sudo ip netns exec "$UE_NS" tracepath -n 8.8.8.8
 fi
-sudo ip netns exec ue1 ping -c 5 8.8.8.8
+sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8
 ```
 
 Expected:
@@ -300,7 +390,7 @@ Expected:
 ### 8.1 srsRAN_Project build fallback
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies
+cd "$WS"
 git clone https://github.com/srsran/srsRAN_Project.git
 cd srsRAN_Project
 mkdir build && cd build
@@ -312,7 +402,7 @@ make -j"$(nproc)"
 
 ```bash
 sudo apt install -y gcc-11 g++-11
-cd /home/abdul-moiz-soomro/prj/group_studies
+cd "$WS"
 git clone https://github.com/srsRAN/srsRAN_4G.git
 cd srsRAN_4G
 mkdir build && cd build
@@ -349,7 +439,7 @@ Use hardware-specific config (for example):
 Run:
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
+cd "$GNB_ROOT/build/apps/gnb"
 sudo ./gnb -c gnb_rf_b200_tdd_n78_20mhz.yml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
 ```
 
@@ -369,7 +459,7 @@ Reference integration path follows srsRAN Near-RT RIC tutorial.
 From `oran-sc-ric`:
 
 ```bash
-cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+cd "$RIC_ROOT"
 docker compose up -d
 docker compose exec python_xapp_runner ./kpm_mon_xapp.py
 ```
@@ -473,10 +563,10 @@ ss -ltnp | grep -E ':2000|:2001' || true
 
 Check:
 ```bash
-sudo ip netns exec ue1 ip -brief addr
-sudo ip netns exec ue1 ip route
-ip -brief addr show ogstun
-sudo iptables -S FORWARD | grep ogstun
+sudo ip netns exec "$UE_NS" ip -brief addr
+sudo ip netns exec "$UE_NS" ip route
+ip -brief addr show "$OGS_TUN"
+sudo iptables -S FORWARD | grep "$OGS_TUN"
 ```
 
 If this still fails, run the full Internet troubleshooting sequence:
@@ -486,11 +576,11 @@ OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || \
   sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
-sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
-  sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
-sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-sudo ip netns exec ue1 ping -c 5 8.8.8.8
+sudo iptables -C FORWARD -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+  sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8
 ```
 
 In this workspace, root cause was host `FORWARD` policy set to `DROP`; explicit `ogstun <-> $OUT_IFACE` rules solved it.
@@ -524,10 +614,31 @@ Restart gNB first, then UE.
 
 **Fix**:
 ```bash
-docker compose -f /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric/docker-compose.yml \
-  --project-directory /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric ps
+docker compose -f "$RIC_ROOT/docker-compose.yml" \
+  --project-directory "$RIC_ROOT" ps
 ```
 Then verify `gNB` uses reachable RIC address/port (`36421`).
+
+If NG setup works but E2 does not, force-enable all E2 agents and service models on gNB launch:
+
+```bash
+sudo "$GNB_ROOT/build/apps/gnb/gnb" \
+  -c "$GNB_ROOT/build/apps/gnb/gnb_zmq.yaml" \
+  log --all_level=info --e2ap_level=debug --ngap_level=info \
+  e2 --enable_du_e2=true --enable_cu_cp_e2=true --enable_cu_up_e2=true \
+     --e2sm_kpm_enabled=true --e2sm_rc_enabled=true \
+     --addr="$E2_IP" --port=36421 --bind_addr="$GNB_BIND_ADDR"
+```
+
+Quick confirmation checks:
+
+```bash
+# gNB log should show accepted E2 connections
+grep -E 'E2 connection to Near-RT-RIC on .* accepted|E2-CU-CP|E2-CU-UP|E2-DU' /tmp/gnb.log
+
+# e2term container should show SCTP associations
+docker exec ric_e2term sh -c 'cat /proc/net/sctp/assocs'
+```
 
 If VM interfaces changed or docker networks were recreated, do not hardcode `10.0.2.10`.
 Use:
@@ -555,20 +666,42 @@ sudo ip addr add 10.53.1.1/24 dev lo || true
 sudo ip addr add 10.53.1.2/24 dev lo || true
 ```
 
+### L) UE exits after `Attaching UE...` with `Closing stdin thread.`
+
+**Cause**:
+- srsUE launched from a non-interactive shell/session where stdin closes early
+- detached automation run (`nohup`/non-tty runner) in some environments
+
+**Fix**:
+- Run srsUE in a persistent interactive terminal (or `tmux`/`screen`) and keep it in foreground.
+- Keep startup order strict: Open5GS -> RIC -> gNB -> UE.
+
+```bash
+sudo ip netns del "$UE_NS" 2>/dev/null || true
+sudo ip netns add "$UE_NS"
+sudo "$UE_ROOT/build/srsue/src/srsue" \
+  "$WS/ue_zmq.conf"
+```
+
+Expected progression in UE terminal:
+- `Random Access Complete`
+- `RRC Connected`
+- `PDU Session Establishment successful`
+
 ---
 
 ## 13) Log Locations and High-Value Greps
 
-- gNB: `/home/abdul-moiz-soomro/prj/group_studies/gnb.log`
-- UE: `/home/abdul-moiz-soomro/prj/group_studies/ue.log`
+- gNB: `/tmp/gnb.log`
+- UE: `/tmp/ue.log`
 - Open5GS runtime: `/tmp/open5gs_5gc.out`
 
 Useful checks:
 
 ```bash
 grep -E 'Registration complete|AMF-Sessions|SMF-Sessions|UPF-Sessions|reject|ERROR|FATAL' /tmp/open5gs_5gc.out | tail -n 50
-grep -E 'N2: Connection to AMF|Connected to AMF|PDUSessionResourceSetup|ERROR' /home/abdul-moiz-soomro/prj/group_studies/gnb.log | tail -n 80
-grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|Failed' /home/abdul-moiz-soomro/prj/group_studies/ue.log | tail -n 80
+grep -E 'N2: Connection to AMF|Connected to AMF|PDUSessionResourceSetup|ERROR' /tmp/gnb.log | tail -n 80
+grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|Failed' /tmp/ue.log | tail -n 80
 ```
 
 ---
@@ -584,6 +717,10 @@ System is considered E2E healthy when all are true:
 5. `sudo ip netns exec ue1 ping -c 5 10.45.0.1` returns `0% packet loss`.
 6. Traceroute path check (`traceroute` if available, otherwise `tracepath`) shows first hop `10.45.0.1`.
 7. `sudo ip netns exec ue1 ping -c 5 8.8.8.8` returns `0% packet loss`.
+
+Dynamic equivalent:
+- `sudo ip netns exec "$UE_NS" ping -c 5 "$CORE_GW_IP"`
+- `sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8`
 
 ---
 
@@ -601,37 +738,41 @@ System is considered E2E healthy when all are true:
 
 ```bash
 # Terminal A
-cd /home/abdul-moiz-soomro/prj/group_studies/open5gs
+cd "$OPEN5GS_ROOT"
 ./build/tests/app/5gc
 
 # Terminal B
-cd /home/abdul-moiz-soomro/prj/group_studies/oran-sc-ric
+cd "$RIC_ROOT"
 docker compose up -d
 
 # Terminal C
-cd /home/abdul-moiz-soomro/prj/group_studies/srsRAN_Project/build/apps/gnb
+cd "$GNB_ROOT/build/apps/gnb"
 E2_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term)
-sudo ./gnb -c gnb_zmq.yaml e2 --addr="$E2_IP" --bind_addr="10.0.2.1"
+sudo ./gnb -c gnb_zmq.yaml \
+  log --all_level=info --e2ap_level=debug --ngap_level=info \
+  e2 --enable_du_e2=true --enable_cu_cp_e2=true --enable_cu_up_e2=true \
+     --e2sm_kpm_enabled=true --e2sm_rc_enabled=true \
+     --addr="$E2_IP" --port=36421 --bind_addr="$GNB_BIND_ADDR"
 
 # Terminal D
-sudo ip netns del ue1 2>/dev/null || true
-sudo ip netns add ue1
-sudo /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/srsue/src/srsue \
-  /home/abdul-moiz-soomro/prj/group_studies/srsRAN_4G/build/build/srsue/src/ue_zmq.conf
+sudo ip netns del "$UE_NS" 2>/dev/null || true
+sudo ip netns add "$UE_NS"
+sudo "$UE_ROOT/build/srsue/src/srsue" \
+  "$WS/ue_zmq.conf"
 
 # Terminal E
-sudo ip netns exec ue1 ping -c 5 10.45.0.1
+sudo ip netns exec "$UE_NS" ping -c 5 "$CORE_GW_IP"
 
 # Terminal F (optional Internet validation)
 OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
-sudo iptables -C FORWARD -i ogstun -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i ogstun -o "$OUT_IFACE" -j ACCEPT
-sudo iptables -C FORWARD -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o ogstun -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -C FORWARD -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -C FORWARD -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 if command -v traceroute >/dev/null 2>&1; then
-  sudo ip netns exec ue1 traceroute -n -m 5 8.8.8.8
+  sudo ip netns exec "$UE_NS" traceroute -n -m 5 8.8.8.8
 else
-  sudo ip netns exec ue1 tracepath -n 8.8.8.8
+  sudo ip netns exec "$UE_NS" tracepath -n 8.8.8.8
 fi
-sudo ip netns exec ue1 ping -c 5 8.8.8.8
+sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8
 ```

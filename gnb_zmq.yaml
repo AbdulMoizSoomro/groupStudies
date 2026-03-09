@@ -1,3 +1,4 @@
+
 # This configuration file example shows how to configure the srsRAN Project gNB to allow srsUE to connect to it. 
 # This specific example uses ZMQ in place of a USRP for the RF-frontend, and creates an FDD cell with 10 MHz bandwidth. 
 # To run the srsRAN Project gNB with this config, use the following command: 
@@ -45,7 +46,7 @@ cell_cfg:
     mcs_table: qam64                # Sets PUSCH MCS to 64 QAM
 
 log:
-  filename: /home/abdul-moiz-soomro/prj/group_studies/gnb.log            # Path of the log file.
+  filename: /tmp/gnb.log            # Path of the log file.
   all_level: info                   # Logging level applied to all layers.
   hex_max_size: 0
 
