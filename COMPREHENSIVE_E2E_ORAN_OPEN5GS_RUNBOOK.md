@@ -47,7 +47,7 @@ export UE_NS="${UE_NS:-ue1}"
 export GNB_BIND_ADDR="${GNB_BIND_ADDR:-10.0.2.1}"
 export CORE_GW_IP="${CORE_GW_IP:-10.45.0.1}"
 
-# Select subscriber profile: A (default) or B.
+# Select subscriber profile: A or B.
 export PROFILE="${PROFILE:-B}"
 if [ "$PROFILE" = "B" ]; then
   export IMSI="001010123456780"
@@ -78,13 +78,13 @@ Use one profile consistently across Open5GS, gNB, UE, and subscriber DB.
 - PLMN: `00101`
 - TAC: `7`
 
-Profile A (default):
+Profile A :
 - IMSI: `001010000000101`
 - Ki: `0C0A34601D4F07677303652C0462535B`
 - OPc: `63BFA50EE6523365FF14C1F45F88737B`
 - APN/DNN: `internet`
 
-Profile B (legacy, also validated in this workspace):
+Profile B :
 - IMSI: `001010123456780`
 - Ki: `00112233445566778899aabbccddeeff`
 - OPc: `63BFA50EE6523365FF14C1F45F88737D`
@@ -94,8 +94,7 @@ If any one of these differs, attach can fail (often as authentication reject or 
 
 ---
 
-```markdown
-## 3) Pre-checks
+## 3 Pre-checks
 
 From workspace root:
 
@@ -112,7 +111,24 @@ systemctl is-active mongod
 
 ```
 
-### 3.1) Recommended Host Packages (Ubuntu)
+Ensure core config identity is aligned for open5gs, gnb, and UE.
+
+Files changed in open5gs: `open5gs/build/configs/sample.yaml`, `/open5gs/configs/open5gs/amf.yaml.in`, `open5gs/configs/open5gs/nrf.yaml.in`
+
+
+Required values:
+- `mcc: 001`
+- `mnc: 01`
+- `tac: 7` (AMF + relevant TAI blocks)
+
+### 3.1 Referenced Documentation
+
+Open5gs : https://open5gs.org/open5gs/docs/guide/02-building-open5gs-from-sources/
+O-RAN NearRT-RIC and xApp : https://docs.srsran.com/projects/project/en/latest/tutorials/source/near-rt-ric/source/index.html
+srsRAN 4G (for UE) : https://docs.srsran.com/projects/4g/en/latest/general/source/1_installation.html and https://docs.srsran.com/projects/4g/en/latest/app_notes/source/zeromq/source/index.html
+
+
+### 3.2 Recommended Host Packages (Ubuntu)
 
 Install standard development and networking tools from the default Ubuntu repositories:
 
@@ -122,9 +138,18 @@ sudo apt install -y git curl wget cmake make gcc g++ pkg-config meson ninja-buil
   libsctp-dev lksctp-tools libyaml-cpp-dev libzmq3-dev libfftw3-dev libmbedtls-dev \
   libgmp-dev libusb-1.0-0-dev iproute2 iptables gnupg lsb-release ca-certificates
 
+# ```bash
+# Additional recommended packages (Ubuntu)
+sudo apt update
+sudo apt install -y python3-pip python3-setuptools python3-wheel ninja-build build-essential \
+  flex bison git cmake libsctp-dev libgnutls28-dev libgcrypt-dev libssl-dev \
+  libmongoc-dev libbson-dev libyaml-dev libnghttp2-dev libmicrohttpd-dev \
+  libcurl4-gnutls-dev libtins-dev libtalloc-dev libzmq3-dev libfftw3-dev \
+  libmbedtls-dev libboost-program-options-dev libconfig++-dev libconfig++1v5 \
+  libsctp-dev meson
 ```
 
-### 3.2) Install Docker & Docker Compose v2
+### 3.3 Install Docker & Docker Compose v2
 
 Because `docker-compose-plugin` is often missing or outdated in default repositories, install it via the official Docker repository:
 
@@ -143,7 +168,7 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin d
 
 ```
 
-### 3.3) Install MongoDB Clients
+### 3.4 Install MongoDB Clients
 
 The `mongodb-clients` package has been removed from newer Ubuntu default repositories. Add the official MongoDB repository to install the necessary tools:
 
@@ -161,7 +186,7 @@ sudo apt install -y mongodb-org-tools mongodb-mongosh
 
 ```
 
-### 3.4) Docker Prerequisites
+### 3.5 Docker Prerequisites
 
 Ensure the Docker daemon is running and your user has the correct permissions:
 
@@ -175,8 +200,6 @@ sudo usermod -aG docker "$USER"
 ---
 
 ## 4) Open5GS Core Setup (Source Build)
-
-Reference: https://open5gs.org/open5gs/docs/guide/02-building-open5gs-from-sources/
 
 ### 4.1 Build/update
 
@@ -253,7 +276,6 @@ bash "$DBCTL" add_ue_with_apn \
 bash "$DBCTL" showpretty | sed -n "/$IMSI/,+40p"
 ```
 
-Optional: keep the legacy profile alongside default (useful when switching UE configs):
 
 ```bash
 DBCTL="$OPEN5GS_ROOT/build/misc/db/open5gs-dbctl"
@@ -277,10 +299,17 @@ npm run dev
 ```
 
 Open WebUI and verify subscriber fields:
-- IMSI `001010000000101`
-- Ki `0C0A34601D4F07677303652C0462535B`
-- OPc `63BFA50EE6523365FF14C1F45F88737B`
-- APN/DNN `internet`
+Profile A :
+- IMSI: `001010000000101`
+- Ki: `0C0A34601D4F07677303652C0462535B`
+- OPc: `63BFA50EE6523365FF14C1F45F88737B`
+- APN/DNN: `internet`
+
+Profile B :
+- IMSI: `001010123456780`
+- Ki: `00112233445566778899aabbccddeeff`
+- OPc: `63BFA50EE6523365FF14C1F45F88737D`
+- APN/DNN: `srsapn`
 
 ---
 
@@ -316,7 +345,7 @@ Expected up containers include: `ric_dbaas`, `ric_e2term`, `ric_e2mgr`, `ric_sub
 
 ---
 
-## 6) gNB + srsUE (Option 1, ZMQ)
+## 6) gNB + srsUE (ZMQ)
 
 ### 6.1 gNB config (`gnb_zmq.yaml`) required values
 
@@ -456,44 +485,6 @@ export CXX="$(which g++-11)"
 cmake ../ -B build
 cmake --build build -j"$(nproc)"
 ```
-
----
-
-## 9) Option 2 (USRP + COTS UE)
-
-Use this only when moving from ZMQ emulation to RF hardware.
-
-### 9.1 UHD + RF dependencies
-
-```bash
-sudo apt-get install -y libuhd-dev uhd-host
-sudo uhd_images_downloader
-uhd_find_devices
-
-sudo apt-get install -y \
-  libpcsclite-dev libbladerf-dev soapysdr-module-all libsctp-dev doxygen \
-  libdwarf-dev libelf-dev binutils-dev libdw-dev libmbedtls-dev libyaml-cpp-dev \
-  lksctp-tools libconfig++-dev
-```
-
-### 9.2 gNB RF config
-
-Use hardware-specific config (for example):
-- `srsRAN_Project/configs/gnb_rf_b200_tdd_n78_20mhz.yml`
-
-Run:
-
-```bash
-cd "$GNB_ROOT/build/apps/gnb"
-sudo ./gnb -c gnb_rf_b200_tdd_n78_20mhz.yml e2 --addr="10.0.2.10" --bind_addr="10.0.2.1"
-```
-
-### 9.3 COTS UE checks
-
-- SIM uses PLMN `00101`
-- APN `internet`
-- Device supports private PLMN
-- Confirm UE receives IP from `10.45.0.0/16` pool and passes UL/DL traffic
 
 ---
 
@@ -748,34 +739,6 @@ grep -E 'Registration complete|AMF-Sessions|SMF-Sessions|UPF-Sessions|reject|ERR
 grep -E 'N2: Connection to AMF|Connected to AMF|PDUSessionResourceSetup|ERROR' /tmp/gnb.log | tail -n 80
 grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|Failed' /tmp/ue.log | tail -n 80
 ```
-
----
-
-## 14) Final Success Criteria
-
-System is considered E2E healthy when all are true:
-
-1. Open5GS NFs are running and no critical startup failures.
-2. RIC compose services are up.
-3. gNB shows AMF and E2 connections established.
-4. UE shows `PDU Session Establishment successful`.
-5. `sudo ip netns exec ue1 ping -c 5 10.45.0.1` returns `0% packet loss`.
-6. Traceroute path check (`traceroute` if available, otherwise `tracepath`) shows first hop `10.45.0.1`.
-7. `sudo ip netns exec ue1 ping -c 5 8.8.8.8` returns `0% packet loss`.
-
-Dynamic equivalent:
-- `sudo ip netns exec "$UE_NS" ping -c 5 "$CORE_GW_IP"`
-- `sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8`
-
----
-
-## 15) Notes About Privileges
-
-- `sudo` is required for:
-  - `ip netns` operations
-  - srsUE GW setup
-  - TUN/iptables setup
-- Non-root runs may look partially healthy but fail at netns/GW stage.
 
 ---
 
