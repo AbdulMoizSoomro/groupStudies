@@ -40,8 +40,4 @@ tmp/
 temp/
 *.tmp
 
-# Ignore heavy upstream source trees in this integration repo
-open5gs/
-oran-sc-ric/
-srsRAN_4G/
-srsRAN_Project/
+
