@@ -1,0 +1,51 @@
+/*
+ *
+ * Copyright 2021-2026 Software Radio Systems Limited
+ *
+ * This file is part of srsRAN.
+ *
+ * srsRAN is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * srsRAN is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * A copy of the GNU Affero General Public License can be found in
+ * the LICENSE file in the top-level directory of this distribution
+ * and at http://www.gnu.org/licenses/.
+ *
+ */
+
+/// \file
+/// \brief Sequence copy.
+
+#pragma once
+
+#include "srsran/srsvec/type_traits.h"
+#include "srsran/srsvec/types.h"
+
+namespace srsran {
+namespace srsvec {
+
+/// \brief Copies a sequence into a different object.
+///
+/// \tparam     T    Type of the destination sequence. (must be compatible with a span).
+/// \tparam     U    Type of the original sequence (must be compatible with a span).
+/// \param[out] dst  Copied sequence.
+/// \param[in]  src  Original sequence.
+template <typename T, typename U>
+void copy(T&& dst, const U& src)
+{
+  static_assert(is_span_compatible<T>::value, "Template type is not compatible with a span");
+  static_assert(is_span_compatible<U>::value, "Template type is not compatible with a span");
+  srsran_srsvec_assert_size(dst, src);
+
+  std::copy(src.begin(), src.end(), dst.begin());
+}
+
+} // namespace srsvec
+} // namespace srsran

@@ -1,0 +1,63 @@
+/*
+ *
+ * Copyright 2021-2026 Software Radio Systems Limited
+ *
+ * This file is part of srsRAN.
+ *
+ * srsRAN is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * srsRAN is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * A copy of the GNU Affero General Public License can be found in
+ * the LICENSE file in the top-level directory of this distribution
+ * and at http://www.gnu.org/licenses/.
+ *
+ */
+
+#pragma once
+
+#include "fapi_adaptor/phy_fapi_p5_sector_operation_request_adaptor.h"
+#include "split6_flexible_o_du_low_session_manager.h"
+#include "srsran/du/du_operation_controller.h"
+#include "srsran/fapi_adaptor/mac/p5/mac_fapi_p5_sector_adaptor.h"
+#include <memory>
+
+namespace srsran {
+
+/// Split 6 flexible O-DU low dependencies.
+struct split6_flexible_o_du_low_dependencies {
+  std::unique_ptr<split6_flexible_o_du_low_session_factory>                   odu_low_session_factory;
+  std::unique_ptr<fapi_adaptor::mac_fapi_p5_sector_adaptor>                   mac_p5_adaptor;
+  std::unique_ptr<fapi_adaptor::phy_fapi_p5_sector_operation_request_adaptor> phy_p5_adaptor;
+};
+
+/// \brief Split 6 flexible O-DU low.
+///
+/// This is the class returned by the application unit when it creates the O-DU low.
+/// This object:
+///  - Manages/owns the configuration adaptor and the FAPI configuration related objects.
+///  - Controls the cell creation/destruction using the cell operation request handler implementation.
+class split6_flexible_o_du_low : public du_operation_controller
+{
+public:
+  explicit split6_flexible_o_du_low(split6_flexible_o_du_low_dependencies dependencies);
+
+  // See interface for documentation.
+  void start() override;
+
+  // See interface for documentation.
+  void stop() override;
+
+private:
+  split6_flexible_o_du_low_session_manager                                    odu_low_session_manager;
+  std::unique_ptr<fapi_adaptor::mac_fapi_p5_sector_adaptor>                   mac_p5_adaptor;
+  std::unique_ptr<fapi_adaptor::phy_fapi_p5_sector_operation_request_adaptor> phy_p5_adaptor;
+};
+
+} // namespace srsran

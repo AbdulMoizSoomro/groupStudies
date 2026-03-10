@@ -1,0 +1,127 @@
+/*
+ *
+ * Copyright 2021-2026 Software Radio Systems Limited
+ *
+ * This file is part of srsRAN.
+ *
+ * srsRAN is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * srsRAN is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * A copy of the GNU Affero General Public License can be found in
+ * the LICENSE file in the top-level directory of this distribution
+ * and at http://www.gnu.org/licenses/.
+ *
+ */
+
+#pragma once
+
+#include "lower_phy_baseband_processor.h"
+#include "processors/adaptors/processor_handler_adaptor.h"
+#include "processors/adaptors/processor_notifier_adaptor.h"
+#include "srsran/adt/circular_array.h"
+#include "srsran/gateways/baseband/baseband_gateway.h"
+#include "srsran/phy/lower/amplitude_controller/amplitude_controller.h"
+#include "srsran/phy/lower/lower_phy.h"
+#include "srsran/phy/lower/lower_phy_configuration.h"
+#include "srsran/phy/lower/lower_phy_controller.h"
+#include "srsran/phy/lower/lower_phy_downlink_handler.h"
+#include "srsran/phy/lower/lower_phy_error_notifier.h"
+#include "srsran/phy/lower/lower_phy_metrics_notifier.h"
+#include "srsran/phy/lower/lower_phy_rx_symbol_notifier.h"
+#include "srsran/phy/lower/lower_phy_timing_notifier.h"
+#include "srsran/phy/lower/lower_phy_uplink_request_handler.h"
+#include "srsran/phy/lower/modulation/ofdm_modulator.h"
+#include "srsran/phy/lower/processors/downlink/downlink_processor.h"
+#include "srsran/phy/lower/processors/uplink/uplink_processor.h"
+#include "srsran/phy/support/resource_grid_pool.h"
+#include "srsran/support/math/stats.h"
+
+namespace srsran {
+
+/// Lower physical layer implementation.
+class lower_phy_impl : public lower_phy, private lower_phy_controller
+{
+public:
+  /// Collects the injected dependencies of the lower physical layer.
+  struct dependencies {
+    /// Downlink processor.
+    std::unique_ptr<lower_phy_downlink_processor> downlink_proc;
+    /// Uplink processor.
+    std::unique_ptr<lower_phy_uplink_processor> uplink_proc;
+    /// Baseband controller.
+    std::unique_ptr<lower_phy_controller> controller;
+    /// Symbol handler to notify the reception of symbols.
+    lower_phy_rx_symbol_notifier& rx_symbol_notifier;
+    /// The timing handler to notify the timing boundaries.
+    lower_phy_timing_notifier& timing_notifier;
+    /// Error handler to notify runtime errors.
+    lower_phy_error_notifier& error_notifier;
+    /// Metrics handler to notify metrics.
+    lower_phy_metrics_notifier& metrics_notifier;
+  };
+
+  /// Constructs a generic lower physical layer.
+  explicit lower_phy_impl(dependencies deps);
+
+  // See interface for documentation.
+  lower_phy_controller& get_controller() override { return *this; }
+
+  // See interface for documentation.
+  lower_phy_uplink_request_handler& get_uplink_request_handler() override
+  {
+    return handler_adaptor.get_uplink_request_handler();
+  }
+
+  // See interface for documentation.
+  lower_phy_downlink_handler& get_downlink_handler() override { return handler_adaptor.get_downlink_handler(); }
+
+  // See interface for documentation.
+  lower_phy_cfo_controller& get_tx_cfo_control() override;
+
+  // See interface for documentation.
+  lower_phy_cfo_controller& get_rx_cfo_control() override;
+
+  // See interface for documentation.
+  lower_phy_center_freq_controller& get_tx_center_freq_control() override;
+
+  // See interface for documentation.
+  lower_phy_center_freq_controller& get_rx_center_freq_control() override;
+
+  // See interface for documentation.
+  lower_phy_tx_time_offset_controller& get_tx_time_offset_control() override;
+
+  // See lower_phy_controller interface for documentation.
+  void start(baseband_gateway_timestamp init_time, baseband_gateway_timestamp sfn0_ref_time) override
+  {
+    controller->start(init_time, sfn0_ref_time);
+  }
+
+  // See lower_phy_controller interface for documentation.
+  void stop() override
+  {
+    downlink_proc->stop();
+    uplink_proc->stop();
+    controller->stop();
+  }
+
+private:
+  /// Processor notification adaptor.
+  processor_notifier_adaptor notification_adaptor;
+  /// Downlink processor.
+  std::unique_ptr<lower_phy_downlink_processor> downlink_proc;
+  /// Uplink processor.
+  std::unique_ptr<lower_phy_uplink_processor> uplink_proc;
+  /// Processor handler adaptor.
+  processor_handler_adaptor handler_adaptor;
+  /// Lower physical layer controller.
+  std::unique_ptr<lower_phy_controller> controller;
+};
+
+} // namespace srsran
