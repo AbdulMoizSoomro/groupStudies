@@ -41,3 +41,6 @@ temp/
 *.tmp
 
 
+open5gs/
+srsRAN_4G/
+srsRAN_Project/
