@@ -1,5 +1,7 @@
 # Comprehensive E2E O-RAN + Open5GS Runbook (Validated in This Workspace)
 
+depreciated: use `_Setup Guide srsRAN + OpenWrt` instead, which is more concise and focused on the core steps. This document is retained for reference but may contain redundant or outdated information.
+
 Date: 2026-03-09  
 Workspace: `/home/testing/prj`
 

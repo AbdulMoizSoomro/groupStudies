@@ -144,21 +144,6 @@ export OPEN5GS_CONFIG=/path/to/sample.yaml
 python app.py
 ```
 
-### Credentials (Recommended)
-
-Instead of passing credentials via CLI arguments (visible in `ps` output):
-
-```bash
-# OpenWrt LuCI RPC password (more secure than --openwrt-password)
-export OPENWRT_PASSWORD=mypassword
-python app.py --openwrt-user admin
-```
-
-> **Security Note**: Environment variables are still visible to processes running as the same user. For production deployment, consider:
-> - Running the tool with minimal privileges
-> - Using container secret management systems (Docker secrets, Kubernetes secrets)
-> - Restricting file permissions on config files
-
 ## Examples
 
 ### 1. Monitor registration success and OpenWrt interfaces live
@@ -199,14 +184,6 @@ python app.py --watch 10
 python app.py --json --openwrt-container openwrt_router --ifaces eth0,eth1
 ```
 
-## Exit Codes
-
-```
-0    Success
-1    Unhandled exception during collection
-2    Configuration error (missing/invalid config file)
-3    No metrics endpoints discovered in config
-```
 
 ## Logging
 
@@ -216,14 +193,6 @@ Logs only warnings and errors to stderr:
 
 ```bash
 python app.py --watch 5 2>&1
-```
-
-### Verbose (DEBUG level)
-
-Full diagnostic information to stderr:
-
-```bash
-python app.py --watch 5 --debug 2>&1
 ```
 
 Example debug output:
@@ -273,6 +242,25 @@ Metrics are derived from the UPF's Prometheus export.
 - `upf_n3_in_pkts`: Counter `fivegs_ep_n3_gtp_indatapktn3upf` (UM-Downlink)
 - `upf_n3_out_pkts`: Counter `fivegs_ep_n3_gtp_outdatapktn3upf` (UM-Uplink)
 
+> **Known Limitation — N3 GTP packet counters always report 0**: In the
+> current Open5GS build used in this testbed, `fivegs_ep_n3_gtp_indatapktn3upf`
+> and `fivegs_ep_n3_gtp_outdatapktn3upf` are permanently zero even while user
+> plane traffic is actively flowing.  This has been verified by running
+> `tcpdump` concurrently:
+>
+> ```bash
+> # Confirms decapsulated ICMP traffic crossing the UPF TUN interface
+> sudo tcpdump -i ogstun -n icmp
+>
+> # Confirms GTP-U encapsulated packets on the N3 interface (UDP 2152)
+> sudo tcpdump -i any -n udp port 2152
+> ```
+>
+> Both captures show correct bidirectional traffic while the Prometheus
+> counters remain at 0.  The data plane is healthy; the counters are not
+> implemented in this build.  Use `tcpdump` on `ogstun` or `udp port 2152`
+> to independently confirm UPF throughput.
+
 ### OpenWrt Raw Metrics (`network_kpi`)
 
 `network_kpi` is now collected from the OpenWrt container itself (not from local host calculations).
@@ -309,85 +297,43 @@ Metrics are derived from the UPF's Prometheus export.
 - `conntrack_count`
 - `conntrack_max`
 
-## Troubleshooting
+## Known Limitations
 
-### "No metrics endpoints found in config"
+### UPF N3 GTP Packet Counters (upf_n3_in_pkts / upf_n3_out_pkts)
 
-**Problem**: Config file is valid YAML but has no `metrics.server` sections.
+The Open5GS UPF Prometheus exporter exposes `fivegs_ep_n3_gtp_indatapktn3upf`
+and `fivegs_ep_n3_gtp_outdatapktn3upf` but does **not** increment them in the
+current build.  They remain at `0` regardless of traffic load.  This is a
+limitation of the Open5GS instrumentation, not of this tool.
 
-**Solution**:
-1. Verify `metrics` section in each NF config:
-   ```yaml
-   amf:
-     metrics:
-       server:
-         - address: 127.0.0.2
-           port: 9090
-   ```
-2. Debug with: `python app.py --debug`
+To verify user-plane traffic is actually flowing, use `tcpdump` directly:
 
-### "Config file not found"
-
-**Problem**: Default hardcoded path doesn't match your setup.
-
-**Solution**:
 ```bash
-export OPEN5GS_CONFIG=/path/to/your/sample.yaml
-python app.py
+# Decapsulated IP traffic visible on the UPF TUN interface
+sudo tcpdump -i ogstun -n icmp
+
+# GTP-U encapsulated traffic on the N3 interface (gNB <-> UPF)
+sudo tcpdump -i any -n udp port 2152
+
+# Full E2E: run a short ping from the UE namespace while capturing
+sudo tcpdump -i ogstun -n -c 10 icmp & sudo ip netns exec ue1 ping -i 1 -c 5 8.8.8.8
 ```
 
-Or use explicit flag:
-```bash
-python app.py --config /path/to/sample.yaml
+Expected output when the data plane is healthy:
+
+```
+IP 10.45.0.2 > 8.8.8.8: ICMP echo request, id ..., seq ..., length 64
+IP 8.8.8.8 > 10.45.0.2: ICMP echo reply,   id ..., seq ..., length 64
 ```
 
-### "Connection failed for amf: HTTPConnectionPool..."
+### OpenWrt Traffic Stops After Route Toggle
 
-**Problem**: Prometheus endpoint unreachable.
+When `toggle_route.sh` switches the UE default route from `ue1owrt`
+(OpenWrt) to `tun_srsue` (Open5GS GTP), OpenWrt interface counters stop
+incrementing — this is expected and correct behaviour.  All subsequent
+traffic flows through the GTP tunnel to Open5GS and is visible on
+`ogstun` / UDP port 2152, not on the OpenWrt container interfaces.
 
-**Causes**:
-- Open5GS NF not running
-- Metrics disabled in config
-- Firewall blocking localhost
-
-**Solution**:
-```bash
-# Check if service is running and listening
-netstat -tlnp | grep 9090
-
-# Verify manual curl works
-curl http://127.0.0.2:9090/metrics
-
-# Run with debug to see connection details
-python app.py --debug
-```
-
-### "Timeout fetching metrics from ..."
-
-**Problem**: NF is running but slow or unresponsive.
-
-**Solution**: Increase timeout:
-```bash
-python app.py --timeout 5.0
-```
-
-### "OpenWrt container metrics are empty"
-
-**Problem**: The specified OpenWrt container is not running or inaccessible.
-
-**Solution**:
-- Verify Docker container name (default is `openwrt_router`):
-  ```bash
-  docker ps --format 'table {{.Names}}\t{{.Status}}'
-  ```
-- Set the container explicitly:
-  ```bash
-  python app.py --openwrt-container openwrt_router --json
-  ```
-- Confirm `/proc` in the OpenWrt container:
-  ```bash
-  docker exec openwrt_router cat /proc/net/dev
-  ```
 
 ## Testing
 
@@ -405,37 +351,4 @@ tests/test_app.py::TestSummarizeKpis::test_registration_success_rate_calculation
 tests/test_app.py::TestDiscoverMetricsEndpoints::test_discover_valid_endpoints PASSED
 ...
 ```
-
-## Development Notes
-
-### Code Structure
-
-- **Parsing functions** (`parse_prometheus_text`, `_read_openwrt_proc_net_dev`): Robust error handling, skip malformed input
-- **Collection functions** (`collect_all`, `collect_network_kpis`, `collect_openwrt_raw_metrics`): Aggregate metrics and pull OpenWrt raw counters
-- **Validators** (`_positive_float`, `_valid_hostname_or_ip`): Input validation at argument parse time
-- **Logging**: Comprehensive logger with DEBUG/INFO levels to stderr
-
-### Error Handling Strategy
-
-1. **Parsing errors**: Skip malformed lines, log at DEBUG level
-2. **Connection errors**: Log WARNING, record in `errors` dict, continue collection
-3. **Configuration errors**: Log ERROR, fail fast (exit code 2)
-4. **Subprocess errors**: Catch timeouts/not-found, return empty results gracefully
-
-### Graceful Shutdown
-
-- SIGINT/SIGTERM captured in watch mode
-- Drains current collection, closes sockets cleanly
-- Logs shutdown message
-- No zombie processes
-
-## Performance Considerations
-
-- **OpenWrt raw metrics collection**: Multiple lightweight `docker exec` calls per collection
-- **Metrics endpoint timeout**: 2.5 seconds default (may need increase for slow systems)
-- **Watch interval**: Minimum 1 second recommended to avoid overwhelming logs
-
-
-
-
 

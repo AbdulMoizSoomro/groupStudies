@@ -1,3 +1,6 @@
+depreciated: use `_Setup Guide srsRAN + OpenWrt` instead, which is more concise and focused on the core steps. This document is retained for reference but may contain redundant or outdated information.
+
+
 # OpenWrt + UE1 Routing Setup (Executed and Verified)
 
 Date: 2026-03-01  
