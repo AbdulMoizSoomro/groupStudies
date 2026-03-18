@@ -106,12 +106,21 @@ python app.py --watch 5 --debug
 python app.py [OPTIONS]
 
 OPTIONS:
-  --config PATH              Path to Open5GS config file (default: auto-discover)
+  --metrics-endpoints ADDR   Comma-separated host:port list (e.g. 127.0.0.2:9090)
   --timeout SECONDS          HTTP request timeout (default: 2.5)
   --json                     Output JSON instead of human-readable format
   --watch SECONDS            Poll interval in seconds (0 = one-time, default: 0)
+  --server PORT              Start HTTP API server on specified port (e.g. 8080)
+  --steer-interval SECONDS   Automated traffic steering every N seconds
+  --steer-script PATH        Path to traffic steering bash script
   --verbose / --debug        Enable debug logging to stderr
   --help                     Show full help with examples
+```
+
+### Traffic Steering Example (Every 5 seconds)
+
+```bash
+python app.py --watch 5 --steer-interval 5
 ```
 
 ### OpenWrt Raw Metrics Options

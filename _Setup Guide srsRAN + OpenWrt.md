@@ -136,12 +136,13 @@ echo "Using E2_IP=$E2_IP"
 
 # Runs with gnb_zmq.yaml file. 
 # !!! Ensure gnb configs match open5gs !!!
+# Note: --bind_addr must be the host's IP on the docker bridge (usually 10.0.2.1)
 sudo "./srsRAN_Project/build/apps/gnb/gnb" \
   -c "./groupStudies/gnb_zmq.yaml" \
   log --all_level=info --e2ap_level=debug --ngap_level=info \
   e2 --enable_du_e2=true --enable_cu_cp_e2=true --enable_cu_up_e2=true \
      --e2sm_kpm_enabled=true --e2sm_rc_enabled=true \
-     --addr="$E2_IP" --port=36421 --bind_addr="10.0.2.10"
+     --addr="$E2_IP" --port=36421 --bind_addr="10.0.2.1"
 ```
 
 Expected output
@@ -242,6 +243,13 @@ listening on ogstun, link-type RAW (Raw IP), snapshot length 262144 bytes
 
 
 ## Ping ue1 > Open5GS > Internet
+Note:
+When you restart your Open5GS core or your machine, the ogstun interface may be recreated or reset. You can use this command to quickly restore it if pings fail again:
+
+```bash
+sudo ip link set ogstun up
+sudo ip addr add 10.45.0.1/16 dev ogstun
+```
 
 ```bash
 # 1. Add default route inside the UE namespace

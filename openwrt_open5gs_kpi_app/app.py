@@ -30,21 +30,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 import yaml
 
-try:
-    from flask import Flask, jsonify
-    HAS_FLASK = True
-except ImportError:
-    HAS_FLASK = False
-
-# optional libuv bindings (UV): not required but may improve performance in some
-# async frameworks or external tools.  We don't use it directly yet, but it's
-# included in requirements for environments that expect it.
-try:
-    import uv  # type: ignore
-    HAS_UV = True
-except ImportError:
-    HAS_UV = False
-
 # Setup logging
 logger = logging.getLogger(__name__)
 _log_handler = logging.StreamHandler(sys.stderr)
@@ -52,36 +37,23 @@ _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(messa
 logger.addHandler(_log_handler)
 logger.setLevel(logging.INFO)
 
+try:
+    from flask import Flask, jsonify
+    HAS_FLASK = True
+except ImportError:
+    HAS_FLASK = False
 
-def _resolve_config_path(config_arg: Optional[str] = None) -> str:
-    """
-    Resolve the Open5GS config file path with fallback logic.
-    
-    Tries in order:
-    1. --config argument (if provided)
-    2. OPEN5GS_CONFIG environment variable
-    3. Default hardcoded path
-    
-    Returns the resolved path as string.
-    Raises FileNotFoundError if no valid config found.
-    """
-    candidates = [
-        config_arg,
-        os.environ.get("OPEN5GS_CONFIG"),
-        "/home/abdul-moiz-soomro/prj/group_studies/open5gs/build/configs/sample.yaml",
-    ]
-    
-    for candidate in candidates:
-        if not candidate:
-            continue
-        p = Path(candidate)
-        if p.exists() and p.is_file():
-            logger.debug(f"Using config: {p}")
-            return str(p)
-    
-    # None found - provide helpful error
-    env_advice = f"\nSet OPEN5GS_CONFIG=/path/to/config.yaml or use --config flag"
-    raise FileNotFoundError(f"No valid Open5GS config found.{env_advice}")
+try:
+    from dotenv import load_dotenv
+    # Explicitly look for .env in the same directory as the script
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=True)
+    else:
+        load_dotenv(override=True)
+    HAS_DOTENV = True
+except ImportError:
+    HAS_DOTENV = False
 
 
 # Will be set by parse_args, used as default for _resolve_config_path in discover_metrics_endpoints
@@ -347,61 +319,6 @@ def collect_openwrt_raw_metrics(container: str, interfaces: List[str]) -> Dict[s
     }
 
 
-def discover_metrics_endpoints(config_path: str) -> List[Endpoint]:
-    """
-    Discover Prometheus metrics endpoints from Open5GS YAML configuration.
-    
-    Parses the Open5GS config file and extracts all network function metrics
-    server endpoints (address, port pairs).
-    
-    Args:
-        config_path: Path to Open5GS sample.yaml config file
-        
-    Returns:
-        List of Endpoint objects discovered in config
-        
-    Raises:
-        FileNotFoundError: If config file does not exist
-        yaml.YAMLError: If config is malformed YAML
-        
-    Note:
-        Silently skips network functions without metrics configuration.
-    """
-    logger.debug(f"Parsing config: {config_path}")
-    try:
-        with open(config_path, "r", encoding="utf-8") as stream:
-            cfg = yaml.safe_load(stream) or {}
-    except FileNotFoundError:
-        logger.error(f"Config file not found: {config_path}")
-        raise
-    except yaml.YAMLError as e:
-        logger.error(f"Failed to parse YAML config: {e}")
-        raise
-
-    endpoints: List[Endpoint] = []
-    for nf_name, nf_cfg in cfg.items():
-        # skip entries for MME; it often isn't running in lightweight setups
-        if nf_name.lower() == "mme":
-            logger.debug("Skipping MME entry from config (not running)")
-            continue
-        if not isinstance(nf_cfg, dict):
-            continue
-        metrics = nf_cfg.get("metrics")
-        if not isinstance(metrics, dict):
-            continue
-        server = metrics.get("server")
-        if not isinstance(server, list):
-            continue
-        for srv in server:
-            if not isinstance(srv, dict):
-                continue
-            address = srv.get("address")
-            port = srv.get("port", 9090)
-            if isinstance(address, str) and isinstance(port, int):
-                ep = Endpoint(nf=nf_name, address=address, port=port)
-                endpoints.append(ep)
-                logger.debug(f"Discovered endpoint: {nf_name} at {ep.url}")
-    
     logger.info(f"Discovered {len(endpoints)} metrics endpoints")
     return endpoints
 
@@ -430,12 +347,14 @@ def parse_prometheus_text(body: str) -> Dict[str, float]:
             continue
         match = PROM_LINE.match(line)
         if not match:
-            logger.debug(f"Skipping unparseable prometheus line: {line[:50]}")
+            # logger.debug(f"Skipping unparseable prometheus line: {line[:50]}")
             continue
         name = match.group("name")
         try:
             value = float(match.group("value"))
             metrics[name] = metrics.get(name, 0.0) + value
+            if name in KPI_KEYS.values():
+                logger.debug(f"KPI Metric Found: {name}={value}")
         except (ValueError, AttributeError) as e:
             logger.debug(f"Failed to parse metric value: {e}")
     return metrics
@@ -1137,21 +1056,21 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--config",
-        default=None,
-        help="Path to Open5GS YAML config (default: OPEN5GS_CONFIG env or hardcoded path)",
+        "--metrics-endpoints",
+        default=os.environ.get("METRICS_ENDPOINTS"),
+        help="Comma-separated host:port list (e.g. 127.0.0.2:9090,127.0.0.4:9090)",
     )
     parser.add_argument(
         "--timeout",
         type=_positive_float,
-        default=2.5,
+        default=float(os.environ.get("TIMEOUT", 2.5)),
         help="HTTP timeout seconds (default: 2.5)",
     )
     parser.add_argument("--json", action="store_true", help="Output JSON instead of human-readable")
     parser.add_argument(
         "--watch",
         type=int,
-        default=0,
+        default=int(os.environ.get("WATCH_INTERVAL", 0)),
         help="Poll interval seconds (0 = once, default: 0)",
     )
     parser.add_argument(
@@ -1163,28 +1082,28 @@ Examples:
     parser.add_argument(
         "--openwrt-host",
         type=_valid_hostname_or_ip,
-        default="192.168.142.200",
+        default=os.environ.get("OPENWRT_HOST", "192.168.142.200"),
         help="OpenWrt host/IP (default: 192.168.142.200)",
     )
     parser.add_argument(
         "--openwrt-timeout",
         type=_positive_float,
-        default=2.0,
+        default=float(os.environ.get("OPENWRT_TIMEOUT", 2.0)),
         help="OpenWrt probe timeout seconds (default: 2.0)",
     )
     parser.add_argument(
         "--openwrt-container",
-        default="openwrt_router",
+        default=os.environ.get("OPENWRT_CONTAINER", "openwrt_router"),
         help="OpenWrt Docker container name for raw metrics (default: openwrt_router)",
     )
     parser.add_argument(
         "--openwrt-user",
-        default="",
+        default=os.environ.get("OPENWRT_USER", ""),
         help="OpenWrt LuCI RPC username (optional)",
     )
     parser.add_argument(
         "--openwrt-password",
-        default="",
+        default=os.environ.get("OPENWRT_PASSWORD", ""),
         help="OpenWrt LuCI RPC password (DEPRECATED: use OPENWRT_PASSWORD env var instead)",
     )
     parser.add_argument(
@@ -1194,8 +1113,19 @@ Examples:
     )
     parser.add_argument(
         "--ifaces",
-        default="eth0,eth1,br-lan,lo",
+        default=os.environ.get("OPENWRT_IFACES", "eth0,eth1,br-lan,lo"),
         help="Comma-separated OpenWrt interfaces to include (default: eth0,eth1,br-lan,lo)",
+    )
+    parser.add_argument(
+        "--steer-interval",
+        type=int,
+        default=int(os.environ.get("STEER_INTERVAL")) if os.environ.get("STEER_INTERVAL") else None,
+        help="Trigger automated traffic steering every N seconds (default: None)",
+    )
+    parser.add_argument(
+        "--steer-script",
+        default=os.environ.get("STEER_SCRIPT"),
+        help="Path to traffic steering script (default: scripts/toggle_route.sh)",
     )
     parser.add_argument(
         "--verbose",
@@ -1224,15 +1154,63 @@ Examples:
     elif os.environ.get("OPENWRT_PASSWORD"):
         logger.warning("OPENWRT_PASSWORD env var is set but --openwrt-password CLI arg takes precedence")
 
+    # Resolve default script path if not provided
+    if not getattr(args, "steer_script", None):
+        default_script = Path(__file__).parent.parent / "scripts" / "toggle_route.sh"
+        if default_script.exists():
+            args.steer_script = str(default_script.resolve())
+        else:
+            args.steer_script = "/home/test-bed/test-bed/groupStudies/scripts/toggle_route.sh"
+
     return args
 
 
-def create_http_server(config_path: str, args: argparse.Namespace) -> "Flask":
+def run_steering_script(script_path: str) -> None:
+    """
+    Execute the traffic steering script and print its output.
+    
+    Args:
+        script_path: Absolute path to toggle_route.sh
+    """
+    logger.info(f"Triggering traffic steering: {script_path}")
+    try:
+        # Check if file exists and is executable
+        if not os.path.exists(script_path):
+            logger.error(f"Steering script not found: {script_path}")
+            return
+
+        result = subprocess.run(
+            ["bash", script_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+        
+        if output:
+            print("\n" + "=" * 20 + " STEERING OUTPUT " + "=" * 20)
+            print(output)
+            print("=" * 57 + "\n")
+            
+        if result.returncode != 0:
+            logger.error(f"Steering script failed (exit {result.returncode}): {error}")
+        else:
+            logger.info("Traffic steering switch completed successfully")
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"Traffic steering script timed out after 15s")
+    except Exception as e:
+        logger.error(f"Failed to execute steering script: {e}")
+
+
+def create_http_server(args: argparse.Namespace) -> "Flask":
     """
     Create Flask HTTP server for exposing KPI endpoint.
     
     Args:
-        config_path: Resolved path to Open5GS config
         args: Parsed arguments for collection settings
         
     Returns:
@@ -1254,7 +1232,7 @@ def create_http_server(config_path: str, args: argparse.Namespace) -> "Flask":
         try:
             endpoints = endpoints_cache.get("endpoints", [])
             if not endpoints:
-                endpoints = discover_metrics_endpoints(config_path)
+                endpoints = _parse_manual_endpoints(args.metrics_endpoints)
                 endpoints_cache["endpoints"] = endpoints
             
             per_nf, errors = collect_all(endpoints, timeout=args.timeout)
@@ -1318,12 +1296,11 @@ def create_http_server(config_path: str, args: argparse.Namespace) -> "Flask":
     return app
 
 
-def run_http_server(config_path: str, args: argparse.Namespace, port: int) -> int:
+def run_http_server(args: argparse.Namespace, port: int) -> int:
     """
     Run HTTP server indefinitely.
     
     Args:
-        config_path: Resolved path to Open5GS config
         args: Parsed arguments
         port: Port to listen on
         
@@ -1336,7 +1313,7 @@ def run_http_server(config_path: str, args: argparse.Namespace, port: int) -> in
     logger.info(f"  /kpi     - KPI metrics (JSON)")
     
     try:
-        app = create_http_server(config_path, args)
+        app = create_http_server(args)
         # Disable Flask's default logging (too verbose)
         flask_logger = logging.getLogger("werkzeug")
         flask_logger.setLevel(logging.WARNING)
@@ -1352,15 +1329,40 @@ def run_http_server(config_path: str, args: argparse.Namespace, port: int) -> in
         return 1
 
 
+def _parse_manual_endpoints(endpoints_str: Optional[str]) -> List[Endpoint]:
+    """Parse comma-separated host:port list into Endpoint objects."""
+    endpoints: List[Endpoint] = []
+    if not endpoints_str:
+        return endpoints
+    for ep_str in endpoints_str.split(","):
+        ep_str = ep_str.strip()
+        if not ep_str:
+            continue
+        
+        # Extract IP for labelling
+        ip = ep_str.split(":")[0]
+        nf_label = f"custom-{ip}"
+
+        if ":" in ep_str:
+            try:
+                host, port = ep_str.rsplit(":", 1)
+                endpoints.append(Endpoint(nf=nf_label, address=host, port=int(port)))
+            except ValueError:
+                logger.warning(f"Invalid endpoint format: {ep_str}")
+        else:
+            endpoints.append(Endpoint(nf=nf_label, address=ep_str, port=9090))
+    return endpoints
+
+
 def main() -> int:
     """
-    Main entry point. Orchestrates config discovery, endpoint collection, 
+    Main entry point. Orchestrates endpoint collection, 
     metrics scraping, and output formatting.
     
     Handles graceful shutdown via SIGINT/SIGTERM in watch mode.
     
     Returns:
-        Exit code (0: success, 2: config error, 3: no endpoints, 1: unhandled exception)
+        Exit code (0: success, 3: no endpoints, 1: unhandled exception)
     """
     args = parse_args()
 
@@ -1368,44 +1370,32 @@ def main() -> int:
     logger.info("Open5GS KPI Collection Tool")
     logger.info("=" * 60)
 
-    # Resolve config path with fallback logic
-    try:
-        config_path = _resolve_config_path(args.config)
-    except FileNotFoundError as e:
-        logger.error(f"Config resolution failed: {e}")
-        print(f"Error: {e}", file=sys.stderr)
-        return 2
+    # 0. Discover OpenWrt Interfaces automatically if not provided
+    if not args.no_openwrt and not os.environ.get("OPENWRT_IFACES") and args.ifaces == "eth0,eth1,br-lan,lo":
+        try:
+            raw_dev = _run_openwrt_cmd(args.openwrt_container, ["cat", "/proc/net/dev"])
+            discovered_ifaces = []
+            for line in raw_dev.splitlines():
+                if ":" in line:
+                    iface = line.split(":")[0].strip()
+                    if iface:
+                        discovered_ifaces.append(iface)
+            if discovered_ifaces:
+                args.ifaces = ",".join(discovered_ifaces)
+                logger.info(f"Auto-discovered OpenWrt interfaces: {args.ifaces}")
+        except Exception as e:
+            logger.warning(f"Failed to auto-discover OpenWrt interfaces: {e}")
+
+    # 1. Manual Endpoints (e.g. from .env or CLI)
+    endpoints = _parse_manual_endpoints(args.metrics_endpoints)
+    if endpoints:
+        logger.info(f"Using {len(endpoints)} metrics endpoints")
+    else:
+        logger.warning("No metrics endpoints configured. Open5GS metrics will be skipped.")
 
     # Handle HTTP server mode
     if args.server:
-        try:
-            endpoints = discover_metrics_endpoints(config_path)
-            if not endpoints:
-                logger.error("No metrics endpoints discovered in config")
-                print("Error: No metrics endpoints found in config", file=sys.stderr)
-                return 3
-        except Exception as exc:
-            logger.error(f"Failed to parse config: {exc}")
-            print(f"Error: Failed to parse config: {exc}", file=sys.stderr)
-            return 2
-        return run_http_server(config_path, args, args.server)
-
-    # Discover endpoints from config
-    try:
-        endpoints = discover_metrics_endpoints(config_path)
-    except FileNotFoundError:
-        logger.error(f"Config file not found: {config_path}")
-        print(f"Error: Config file not found: {config_path}", file=sys.stderr)
-        return 2
-    except Exception as exc:
-        logger.error(f"Failed to parse config: {exc}")
-        print(f"Error: Failed to parse config: {exc}", file=sys.stderr)
-        return 2
-
-    if not endpoints:
-        logger.error("No metrics endpoints discovered in config")
-        print("Error: No metrics endpoints found in config", file=sys.stderr)
-        return 3
+        return run_http_server(args, args.server)
 
     # Setup graceful shutdown handling
     shutdown_event = False
@@ -1421,10 +1411,21 @@ def main() -> int:
 
     # Main collection loop
     iteration = 0
+    start_time = time.time()
+    last_steer_time = start_time
+    
     try:
         while True:
             iteration += 1
+            now = time.time()
             logger.debug(f"Starting collection iteration {iteration}")
+
+            # Automated steering based on timer
+            if args.steer_interval is not None and args.steer_interval > 0:
+                elapsed = now - last_steer_time
+                if elapsed >= args.steer_interval:
+                    run_steering_script(args.steer_script)
+                    last_steer_time = now
 
             try:
                 per_nf, errors = collect_all(endpoints, timeout=args.timeout)
@@ -1509,4 +1510,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Try loading .env before main starts
+    try:
+        from dotenv import load_dotenv
+        env_path = Path(__file__).resolve().parent / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=True)
+    except ImportError:
+        pass
+        
     raise SystemExit(main())
