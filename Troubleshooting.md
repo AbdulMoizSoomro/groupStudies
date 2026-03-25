@@ -1,4 +1,4 @@
-## 12) Common Problems and Fixes
+## Common Problems and Fixes
 
 ### A) `Attaching UE...` appears stuck
 
@@ -193,66 +193,7 @@ Expected progression in UE terminal:
 
 ---
 
-## 13) Log Locations and High-Value Greps
-
-- gNB: `/tmp/gnb.log`
-- UE: `/tmp/ue.log`
-- Open5GS runtime: `/tmp/open5gs_5gc.out`
-
-Useful checks:
-
-```bash
-grep -E 'Registration complete|AMF-Sessions|SMF-Sessions|UPF-Sessions|reject|ERROR|FATAL' /tmp/open5gs_5gc.out | tail -n 50
-grep -E 'N2: Connection to AMF|Connected to AMF|PDUSessionResourceSetup|ERROR' /tmp/gnb.log | tail -n 80
-grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|Failed' /tmp/ue.log | tail -n 80
-```
-
----
-
-## 16) Quick Daily Re-Run (Minimal Commands)
-
-```bash
-# Terminal A
-cd "$OPEN5GS_ROOT"
-./build/tests/app/5gc
-
-# Terminal B
-cd "$RIC_ROOT"
-docker compose up -d
-
-# Terminal C
-cd "$GNB_ROOT/build/apps/gnb"
-E2_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ric_e2term)
-sudo ./gnb -c gnb_zmq.yaml \
-  log --all_level=info --e2ap_level=debug --ngap_level=info \
-  e2 --enable_du_e2=true --enable_cu_cp_e2=true --enable_cu_up_e2=true \
-     --e2sm_kpm_enabled=true --e2sm_rc_enabled=true \
-     --addr="$E2_IP" --port=36421 --bind_addr="$GNB_BIND_ADDR"
-
-# Terminal D
-sudo ip netns del "$UE_NS" 2>/dev/null || true
-sudo ip netns add "$UE_NS"
-sudo "$UE_ROOT/build/srsue/src/srsue" \
-  "$WS/ue_zmq.conf"
-
-# Terminal E
-sudo ip netns exec "$UE_NS" ping -c 5 "$CORE_GW_IP"
-
-# Terminal F (optional Internet validation)
-OUT_IFACE=$(ip route show default | awk '{print $5; exit}')
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
-sudo iptables -C FORWARD -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OGS_TUN" -o "$OUT_IFACE" -j ACCEPT
-sudo iptables -C FORWARD -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i "$OUT_IFACE" -o "$OGS_TUN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-if command -v traceroute >/dev/null 2>&1; then
-  sudo ip netns exec "$UE_NS" traceroute -n -m 5 8.8.8.8
-else
-  sudo ip netns exec "$UE_NS" tracepath -n 8.8.8.8
-fi
-sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8
-```
-
-## OpenWrt Destination Port Unreacable
+### M) OpenWrt Destination Port Unreacable
 
 The `Destination Port Unreachable` error can be caused by a conflict in the OpenWrt firewall rules. The container coud have active `fw4` rules (the default OpenWrt firewall) alongside the manual `nftables` rules applied in the guide. The `fw4` rules can rejecting the forwarded traffic by default.
 
@@ -275,3 +216,20 @@ docker exec openwrt_router sh -c "
   nft add rule ip nat postrouting oifname 'eth0' counter masquerade
 "
 ```
+## 13) Log Locations and High-Value Greps
+
+- gNB: `/tmp/gnb.log`
+- UE: `/tmp/ue.log`
+- Open5GS runtime: `/tmp/open5gs_5gc.out`
+
+Useful checks:
+
+```bash
+grep -E 'Registration complete|AMF-Sessions|SMF-Sessions|UPF-Sessions|reject|ERROR|FATAL' /tmp/open5gs_5gc.out | tail -n 50
+grep -E 'N2: Connection to AMF|Connected to AMF|PDUSessionResourceSetup|ERROR' /tmp/gnb.log | tail -n 80
+grep -E 'Attaching UE|RRC Connected|PDU Session Establishment successful|Reject|Failed' /tmp/ue.log | tail -n 80
+```
+
+---
+
+
