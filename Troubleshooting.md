@@ -251,3 +251,27 @@ else
 fi
 sudo ip netns exec "$UE_NS" ping -c 5 8.8.8.8
 ```
+
+## OpenWrt Destination Port Unreacable
+
+The `Destination Port Unreachable` error can be caused by a conflict in the OpenWrt firewall rules. The container coud have active `fw4` rules (the default OpenWrt firewall) alongside the manual `nftables` rules applied in the guide. The `fw4` rules can rejecting the forwarded traffic by default.
+
+we can resolve this by flushing the existing `nftables` rules and reapplying a minimal, functional configuration.
+
+### Steps taken to fix:
+1.  **Stopped conflicting firewall rules**: Flushed the default `fw4` chains that were rejecting traffic.
+2.  **Re-applied NAT and Forwarding**:
+    -   Set `inet filter forward` policy to `accept`.
+    -   Ensured `masquerade` is enabled on the `eth0` (WAN) interface.
+
+```bash
+docker exec openwrt_router sh -c "
+  nft flush ruleset
+  nft add table inet filter
+  nft 'add chain inet filter input { type filter hook input priority 0; policy accept; }'
+  nft 'add chain inet filter forward { type filter hook forward priority 0; policy accept; }'
+  nft add table ip nat
+  nft 'add chain ip nat postrouting { type nat hook postrouting priority 100; policy accept; }'
+  nft add rule ip nat postrouting oifname 'eth0' counter masquerade
+"
+```
