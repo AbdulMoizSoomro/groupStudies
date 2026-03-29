@@ -979,6 +979,25 @@ def summarize_kpis(per_nf: Dict[str, Dict[str, float]]) -> Dict[str, float]:
     return summary
 
 
+def extract_raw_metrics(per_nf: Dict[str, Dict[str, float]], metric_names: Optional[str]) -> Dict[str, float]:
+    """
+    Extract arbitrary metrics from per-NF dict and merge them.
+    
+    If metric_names is empty or None, returns all metrics from all NFs.
+    Otherwise, filters to only requested metric names.
+    """
+    merged: Dict[str, float] = {}
+    for nf_metrics in per_nf.values():
+        for metric_name, value in nf_metrics.items():
+            merged[metric_name] = merged.get(metric_name, 0.0) + value
+    
+    if not metric_names or not metric_names.strip():
+        return merged
+    
+    requested = set(name.strip() for name in metric_names.split(",") if name.strip())
+    return {k: v for k, v in merged.items() if k in requested}
+
+
 def print_human(
     endpoints: List[Endpoint],
     summary: Dict[str, float],
@@ -986,6 +1005,7 @@ def print_human(
     openwrt: Dict[str, Any],
     openwrt_error: Optional[str],
     network_kpi: Optional[Dict[str, Any]],
+    raw_metrics: Optional[Dict[str, float]] = None,
 ) -> None:
     """
     Print human-readable KPI snapshot to stdout.
@@ -1013,6 +1033,15 @@ def print_human(
             print(f"- {key:30s}: {int(val)}")
         else:
             print(f"- {key:30s}: {val:.4f}")
+
+    if raw_metrics:
+        print("\nRaw Metrics")
+        for key in sorted(raw_metrics.keys()):
+            val = raw_metrics[key]
+            if abs(val - int(val)) < 1e-9:
+                print(f"- {key:40s}: {int(val)}")
+            else:
+                print(f"- {key:40s}: {val:.4f}")
 
     if openwrt:
         print("\nOpenWrt")
@@ -1059,6 +1088,11 @@ Examples:
         "--metrics-endpoints",
         default=os.environ.get("METRICS_ENDPOINTS"),
         help="Comma-separated host:port list (e.g. 127.0.0.2:9090,127.0.0.4:9090)",
+    )
+    parser.add_argument(
+        "--raw-metrics",
+        default=os.environ.get("RAW_METRICS", ""),
+        help="Comma-separated metric names to include in raw_metrics output (empty=all)",
     )
     parser.add_argument(
         "--timeout",
@@ -1237,6 +1271,7 @@ def create_http_server(args: argparse.Namespace) -> "Flask":
             
             per_nf, errors = collect_all(endpoints, timeout=args.timeout)
             summary = summarize_kpis(per_nf)
+            raw_metrics = extract_raw_metrics(per_nf, "" if not hasattr(args, 'raw_metrics') else args.raw_metrics)
             
             interfaces = [item.strip() for item in args.ifaces.split(",") if item.strip()]
             try:
@@ -1265,6 +1300,7 @@ def create_http_server(args: argparse.Namespace) -> "Flask":
             payload = {
                 "timestamp": int(time.time()),
                 "kpi": summary,
+                "raw_metrics": raw_metrics,
                 "network_kpi": network_kpi,
                 "errors": errors,
                 "openwrt": openwrt,
@@ -1430,6 +1466,7 @@ def main() -> int:
             try:
                 per_nf, errors = collect_all(endpoints, timeout=args.timeout)
                 summary = summarize_kpis(per_nf)
+                raw_metrics = extract_raw_metrics(per_nf, args.raw_metrics)
                 
                 interfaces = [item.strip() for item in args.ifaces.split(",") if item.strip()]
                 try:
@@ -1458,6 +1495,7 @@ def main() -> int:
                 payload = {
                     "timestamp": int(time.time()),
                     "kpi": summary,
+                    "raw_metrics": raw_metrics,
                     "network_kpi": network_kpi,
                     "errors": errors,
                     "openwrt": openwrt,
@@ -1472,7 +1510,7 @@ def main() -> int:
                         logger.error(f"Failed to serialize JSON: {e}")
                         print(f"Error: JSON serialization failed: {e}", file=sys.stderr)
                 else:
-                    print_human(endpoints, summary, errors, openwrt, openwrt_error, network_kpi)
+                    print_human(endpoints, summary, errors, openwrt, openwrt_error, network_kpi, raw_metrics)
 
                 if args.watch <= 0:
                     break
