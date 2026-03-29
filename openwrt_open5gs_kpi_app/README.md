@@ -8,6 +8,7 @@ A robust Python application for collecting and monitoring KPI metrics from Open5
 
 - **Auto-discovery**: Reads Open5GS YAML config and discovers all metrics endpoints (AMF, SMF, UPF, MME, etc.)
 - **KPI aggregation**: Extracts high-level KPIs (registration success rate, active UEs, session counts)
+- **O-RAN Integration**: Fetches dynamic raw gNB telemetry (E2SM-KPM) from O-RAN RIC via Prometheus Pushgateway
 - **OpenWrt raw metrics**: Pulls interface/network/system counters directly from OpenWrt container `/proc`
 - **No local host network math**: `network_kpi` is sourced from OpenWrt, not derived from local ping/throughput calculations
 - **OpenWrt integration**: Uses Docker exec against the target OpenWrt container (default: `openwrt_router`)
@@ -62,6 +63,7 @@ Endpoints
 -  amf: http://127.0.0.2:9090/metrics
 - smf1: http://127.0.0.3:9090/metrics
 - upf1: http://127.0.0.7:9090/metrics
+- custom-10.0.2.16: http://10.0.2.16:9091/metrics
 
 KPIs
 - amf_gnbs                    : 0
@@ -75,6 +77,10 @@ KPIs
 - upf_active_sessions         : 3
 - upf_n3_in_pkts              : 45982
 - upf_n3_out_pkts             : 46042
+
+Raw Metrics
+- DRB_UEThpDl                 : 1240
+- DRB_UEThpUl                 : 550
 
 Network/System KPIs
 {...}
@@ -106,7 +112,7 @@ python app.py --watch 5 --debug
 python app.py [OPTIONS]
 
 OPTIONS:
-  --metrics-endpoints ADDR   Comma-separated host:port list (e.g. 127.0.0.2:9090)
+  --metrics-endpoints ADDR   Comma-separated host:port list (e.g. 127.0.0.4:9090,10.0.2.16:9091)
   --timeout SECONDS          HTTP request timeout (default: 2.5)
   --json                     Output JSON instead of human-readable format
   --watch SECONDS            Poll interval in seconds (0 = one-time, default: 0)
@@ -231,6 +237,10 @@ sums them across all AMF instances discovered in the config.
 - `amf_registered_ues`: Gauge of currently registered UEs
   (`fivegs_amffunction_rm_registeredsubnbr`)
 - `amf_gnbs`: Number of connected gNodeBs (metric name `gnb`)
+
+### O-RAN gNB Telemetry (Raw Metrics)
+
+The tool dynamically fetches E2SM-KPM telemetry (e.g., `DRB_UEThpUl`, `DRB_UEThpDl`) published by the O-RAN SC RIC xApps. Since gNB metrics are highly variable, the app dynamically extracts and formats everything published to the Prometheus Pushgateway under the `Raw Metrics` group.
 
 ### SMF (Session Management Function)
 
