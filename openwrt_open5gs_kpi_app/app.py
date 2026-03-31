@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
-import yaml
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -55,9 +54,6 @@ try:
 except ImportError:
     HAS_DOTENV = False
 
-
-# Will be set by parse_args, used as default for _resolve_config_path in discover_metrics_endpoints
-DEFAULT_CONFIG: Optional[str] = None
 
 KPI_KEYS = {
     "amf_reg_init_req": "fivegs_amffunction_rm_reginitreq",
@@ -317,10 +313,6 @@ def collect_openwrt_raw_metrics(container: str, interfaces: List[str]) -> Dict[s
         },
         "conntrack": _read_openwrt_conntrack(container),
     }
-
-
-    logger.info(f"Discovered {len(endpoints)} metrics endpoints")
-    return endpoints
 
 
 def parse_prometheus_text(body: str) -> Dict[str, float]:
@@ -1073,8 +1065,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment Variables:
-  OPEN5GS_CONFIG        Path to Open5GS config (overrides default)
   OPENWRT_PASSWORD      OpenWrt LuCI RPC password (more secure than --openwrt-password)
+  METRICS_ENDPOINTS     Comma-separated list of metrics endpoints config
 
 Examples:
   %(prog)s                           # One-time snapshot, human-readable
@@ -1162,14 +1154,9 @@ Examples:
         help="Path to traffic steering script (default: scripts/toggle_route.sh)",
     )
     parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging (DEBUG level)",
-    )
-    parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug logging (alias for --verbose)",
+        help="Enable debug logging",
     )
 
     args = parser.parse_args()
@@ -1179,7 +1166,7 @@ Examples:
         parser.error("--server and --watch cannot be used together")
 
     # Set logging level based on flags
-    if args.verbose or args.debug:
+    if args.debug:
         logger.setLevel(logging.DEBUG)
     
     # Read password from env var if not provided via CLI
