@@ -1362,9 +1362,10 @@ def _parse_manual_endpoints(endpoints_str: Optional[str]) -> List[Endpoint]:
         if not ep_str:
             continue
         
-        # Extract IP for labelling
+        # Extract IP and Port for labelling
         ip = ep_str.split(":")[0]
-        nf_label = f"custom-{ip}"
+        port = ep_str.split(":")[1] if ":" in ep_str else "9090"
+        nf_label = f"custom-{ip}-{port}"
 
         if ":" in ep_str:
             try:

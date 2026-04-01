@@ -109,9 +109,15 @@ make -j`nproc`
 1. We require [docker](https://docs.docker.com/engine/install/ubuntu/), and [docker compose](https://docs.docker.com/compose/install/#plugin-linux-only), you can follow the [official Docker] for the setup
 2. Using Docker container, we can setup the oran sc ric
 ```bash
-git clone https://github.com/srsran/oran-sc-ric
+git clone https://github.com/AbdulMoizSoomro/group-studies-oran-sc-ric
 cd ./oran-sc-ric
 docker compose up
+```
+
+Ensure that you are running the kpm_mon_xapp.py script in the container, which collects KPIs from the gNB and exposes them to Prometheus. You can check the logs of the kpm_mon_xapp.py container to verify that it is running correctly and collecting data.
+
+```bash
+docker compose exec -d python_xapp_runner python3 /opt/xApps/kpm_mon_xapp.py
 ```
 
 ---
@@ -198,6 +204,14 @@ RRC NR reconfiguration successful.
 # Open5GS + UE1 Routing Guide
 ## Ping ue1 > Open5GS (10.45.0.1)
 
+Note:
+When you restart your Open5GS core or your machine, the ogstun interface may be recreated or reset. You can use this command to quickly restore it if pings fail again:
+
+```bash
+sudo ip link set ogstun up
+sudo ip addr add 10.45.0.1/16 dev ogstun
+```
+
 ```bash
 sudo ip netns exec ue1 ip -brief addr          # List all IP addresses assigned to interfaces inside the 'ue1' namespace in a concise format.
 sudo ip netns exec ue1 ip route               # Show the routing table for the 'ue1' namespace to see where traffic is being directed.
@@ -243,13 +257,7 @@ listening on ogstun, link-type RAW (Raw IP), snapshot length 262144 bytes
 
 
 ## Ping ue1 > Open5GS > Internet
-Note:
-When you restart your Open5GS core or your machine, the ogstun interface may be recreated or reset. You can use this command to quickly restore it if pings fail again:
 
-```bash
-sudo ip link set ogstun up
-sudo ip addr add 10.45.0.1/16 dev ogstun
-```
 
 ```bash
 # 1. Add default route inside the UE namespace
