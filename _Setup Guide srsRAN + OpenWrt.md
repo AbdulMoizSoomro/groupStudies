@@ -61,7 +61,9 @@ bash "open5gs/build/misc/db/open5gs-dbctl" add_ue_with_apn \
 # 3. Show the subscriber list to verify the entry exists
 bash "open5gs/build/misc/db/open5gs-dbctl" showfiltered
 		```
-		
+			Metrics reduce data plane performance.
+
+				6. **Note on UPF N3 Packet Metrics:** If you notice that `upf_n3_in_pkts` and `out` are showing zero packets, this is due to missing metric calculation code in the Open5GS UPF source (specifically in `open5gs/src/upf/gtp-path.c` where `ogs_pfcp_xact_update_vol_metrics` is not being called for the N3 interface). You may need to patch this manually if you require N3 packet metrics.
 ---
 
  ***Ensure Zeromq is installed*** it is vital for UE(srsRAN_4G) and gNb(srsRAN_Project)
