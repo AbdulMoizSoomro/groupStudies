@@ -120,6 +120,10 @@ Ensure that you are running the kpm_mon_xapp.py script in the container, which c
 docker compose exec -d python_xapp_runner python3 /opt/xApps/kpm_mon_xapp.py
 ```
 
+The default kpm_mon_xapp.py by `https://github.com/srsran/oran-sc-ric` has been modified to use the O-RAN RIC E2 interface.
+KPI data is pushed to Prometheus.
+The app.py service fetches these metrics from Prometheus using the configured IP address.
+
 ---
 
 
@@ -127,11 +131,13 @@ docker compose exec -d python_xapp_runner python3 /opt/xApps/kpm_mon_xapp.py
 # Run the Services
 ## 1. Open5gs
 ```bash
-./open5gs/build/tests/app/5gc # Starts all the open5gs servicese
+sudo ./open5gs/build/tests/app/5gc # Starts all the open5gs servicese
 ```
 ## 2. Oran sc ric
 ```bash
 docker compose up -d # run oran sc ric containers
+docker compose exec -d python_xapp_runner python3 /opt/xApps/kpm_mon_xapp.py
+
 ```
 ## 3. gNB
 ```bash
