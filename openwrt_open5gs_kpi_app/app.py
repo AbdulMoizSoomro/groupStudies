@@ -5,7 +5,7 @@ Open5GS KPI Collection Tool
 Fetches KPI snapshots from Open5GS Prometheus metrics endpoints, including:
 - 5GC function metrics (AMF registration, active UEs, PFCP sessions)
 - Network/system statistics (throughput, latency, CPU, memory)
-- OpenWrt host reachability and system info (optional)
+- OpenWrt raw container metrics (optional)
 
 Exit codes:
   0: Success
@@ -28,12 +28,22 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
+from services import config as config_service
+from services import host as host_service
+from services import network as network_service
+from services import openwrt as openwrt_service
+from services import output as output_service
+from services import prometheus as prometheus_service
+from services import runtime as runtime_service
+from services import server as server_service
+from services import snapshot as snapshot_service
 
 # Setup logging
 logger = logging.getLogger(__name__)
 _log_handler = logging.StreamHandler(sys.stderr)
 _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger.addHandler(_log_handler)
+if not logger.handlers:
+    logger.addHandler(_log_handler)
 logger.setLevel(logging.INFO)
 
 try:
@@ -44,33 +54,36 @@ except ImportError:
 
 try:
     from dotenv import load_dotenv
-    # Explicitly look for .env in the same directory as the script
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path, override=True)
-    else:
-        load_dotenv(override=True)
     HAS_DOTENV = True
 except ImportError:
     HAS_DOTENV = False
 
 
-KPI_KEYS = {
-    "amf_reg_init_req": "fivegs_amffunction_rm_reginitreq",
-    "amf_reg_init_succ": "fivegs_amffunction_rm_reginitsucc",
-    "amf_registered_ues": "fivegs_amffunction_rm_registeredsubnbr",
-    "amf_gnbs": "gnb",
-    "smf_active_ues": "ues_active",
-    "smf_pfcp_sessions_active": "pfcp_sessions_active",
-    "smf_pfcp_peers_active": "pfcp_peers_active",
-    "upf_active_sessions": "fivegs_upffunction_upf_sessionnbr",
-    "upf_n3_in_pkts": "fivegs_ep_n3_gtp_indatapktn3upf",
-    "upf_n3_out_pkts": "fivegs_ep_n3_gtp_outdatapktn3upf",
-}
+KPI_KEYS = prometheus_service.KPI_KEYS
 
-PROM_LINE = re.compile(
-    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+(?P<value>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)$"
-)
+ERROR_CATEGORY_CONFIG = snapshot_service.ERROR_CATEGORY_CONFIG
+ERROR_CATEGORY_ENDPOINT_FETCH = snapshot_service.ERROR_CATEGORY_ENDPOINT_FETCH
+ERROR_CATEGORY_OPENWRT_COLLECTION = snapshot_service.ERROR_CATEGORY_OPENWRT_COLLECTION
+ERROR_CATEGORY_SERIALIZATION = snapshot_service.ERROR_CATEGORY_SERIALIZATION
+ERROR_CATEGORY_RUNTIME = snapshot_service.ERROR_CATEGORY_RUNTIME
+
+PROM_LINE = prometheus_service.PROM_LINE
+
+_ENV_INITIALIZED = False
+
+
+def initialize_environment() -> None:
+    """Load environment variables exactly once."""
+    global _ENV_INITIALIZED
+    if _ENV_INITIALIZED or not HAS_DOTENV:
+        return
+
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=True)
+    else:
+        load_dotenv(override=True)
+    _ENV_INITIALIZED = True
 
 
 # Argparse custom type validators
@@ -96,8 +109,51 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"Invalid positive integer: {e}")
 
 
+def _non_negative_int(value: str) -> int:
+    """Validate that argument is a non-negative integer."""
+    try:
+        i = int(value)
+        if i < 0:
+            raise ValueError(f"Must be non-negative, got {i}")
+        return i
+    except (ValueError, TypeError) as e:
+        raise argparse.ArgumentTypeError(f"Invalid non-negative integer: {e}")
+
+
+def _env_non_negative_int(name: str, default: int = 0) -> int:
+    """Parse non-negative integer from env with safe fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {name}: expected integer, got {raw!r}")
+        return default
+    if value < 0:
+        logger.warning(f"Ignoring invalid {name}: expected non-negative integer, got {value}")
+        return default
+    return value
+
+
+def _env_optional_non_negative_int(name: str) -> Optional[int]:
+    """Parse optional non-negative integer from env with safe fallback."""
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {name}: expected non-negative integer, got {raw!r}")
+        return None
+    if value < 0:
+        logger.warning(f"Ignoring invalid {name}: expected non-negative integer, got {value}")
+        return None
+    return value
+
+
 def _valid_hostname_or_ip(value: str) -> str:
-    """Validate hostname or IP address for ping/probe target."""
+    """Validate hostname or IP address for OpenWrt host target."""
     if not value or len(value) > 255:
         raise argparse.ArgumentTypeError(f"Invalid hostname: {value}")
     # Allow alphanumeric, dots, hyphens, underscores (basic validation)
@@ -120,7 +176,7 @@ class Endpoint:
 
 @dataclass(frozen=True)
 class OpenWrtTarget:
-    """OpenWrt host configuration for ICMP/HTTP/LuCI probing."""
+    """OpenWrt host configuration for raw OpenWrt collection flow."""
     host: str
     timeout: float
     container: str = "openwrt_router"
@@ -137,182 +193,76 @@ class NetworkKpiConfig:
 
 def _run_openwrt_cmd(container: str, cmd: List[str], timeout: float = 5.0) -> str:
     """Run a command inside OpenWrt container and return combined stdout/stderr."""
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container, *cmd],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=max(1.0, timeout),
-        )
-        return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    except subprocess.TimeoutExpired:
-        logger.warning(f"OpenWrt command timeout for container {container}: {' '.join(cmd)}")
-        return ""
-    except Exception as e:
-        logger.warning(f"OpenWrt command failed for container {container}: {e}")
-        return ""
+    return openwrt_service.run_openwrt_cmd(
+        container,
+        cmd,
+        timeout=timeout,
+        run_cmd_fn=subprocess.run,
+        timeout_exc_cls=subprocess.TimeoutExpired,
+        log_warning_fn=logger.warning,
+    )
 
 
 def _read_openwrt_proc_net_dev(container: str) -> Dict[str, Dict[str, int]]:
     """Read full per-interface counters from OpenWrt /proc/net/dev."""
-    raw = _run_openwrt_cmd(container, ["cat", "/proc/net/dev"], timeout=5.0)
-    out: Dict[str, Dict[str, int]] = {}
-    lines = raw.splitlines()
-    start_idx = 0
-    for i, line in enumerate(lines):
-        if line.strip().startswith("Inter-|"):
-            start_idx = i + 2
-            break
-
-    for line in lines[start_idx:]:
-        if ":" not in line:
-            continue
-        iface, rest = line.split(":", 1)
-        iface = iface.strip()
-        cols = rest.split()
-        if len(cols) < 16:
-            continue
-        try:
-            out[iface] = {
-                "rx_bytes": int(cols[0]),
-                "rx_packets": int(cols[1]),
-                "rx_errs": int(cols[2]),
-                "rx_drop": int(cols[3]),
-                "rx_fifo": int(cols[4]),
-                "rx_frame": int(cols[5]),
-                "rx_compressed": int(cols[6]),
-                "rx_multicast": int(cols[7]),
-                "tx_bytes": int(cols[8]),
-                "tx_packets": int(cols[9]),
-                "tx_errs": int(cols[10]),
-                "tx_drop": int(cols[11]),
-                "tx_fifo": int(cols[12]),
-                "tx_colls": int(cols[13]),
-                "tx_carrier": int(cols[14]),
-                "tx_compressed": int(cols[15]),
-            }
-        except ValueError:
-            continue
-    return out
+    return openwrt_service.read_openwrt_proc_net_dev(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def _read_openwrt_meminfo(container: str) -> Dict[str, int]:
     """Read all numeric meminfo fields from OpenWrt /proc/meminfo."""
-    raw = _run_openwrt_cmd(container, ["cat", "/proc/meminfo"], timeout=5.0)
-    out: Dict[str, int] = {}
-    for line in raw.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        parts = value.strip().split()
-        if not parts:
-            continue
-        try:
-            out[key] = int(parts[0])
-        except ValueError:
-            continue
-    return out
+    return openwrt_service.read_openwrt_meminfo(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def _read_openwrt_cpu_stat(container: str) -> Dict[str, Any]:
     """Read raw CPU stat fields from OpenWrt /proc/stat without calculations."""
-    raw = _run_openwrt_cmd(container, ["cat", "/proc/stat"], timeout=5.0)
-    for line in raw.splitlines():
-        if line.startswith("cpu "):
-            parts = line.split()
-            vals: List[int] = []
-            for item in parts[1:]:
-                try:
-                    vals.append(int(item))
-                except ValueError:
-                    vals.append(0)
-            return {
-                "fields": [
-                    "user",
-                    "nice",
-                    "system",
-                    "idle",
-                    "iowait",
-                    "irq",
-                    "softirq",
-                    "steal",
-                    "guest",
-                    "guest_nice",
-                ],
-                "values": vals,
-            }
-    return {}
+    return openwrt_service.read_openwrt_cpu_stat(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def _read_openwrt_uptime(container: str) -> Dict[str, float]:
     """Read raw uptime values from OpenWrt /proc/uptime."""
-    raw = _run_openwrt_cmd(container, ["cat", "/proc/uptime"], timeout=5.0)
-    parts = raw.split()
-    if len(parts) < 2:
-        return {}
-    try:
-        return {
-            "uptime_seconds": float(parts[0]),
-            "idle_seconds": float(parts[1]),
-        }
-    except ValueError:
-        return {}
+    return openwrt_service.read_openwrt_uptime(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def _read_openwrt_loadavg(container: str) -> Dict[str, Any]:
     """Read raw loadavg values from OpenWrt /proc/loadavg."""
-    raw = _run_openwrt_cmd(container, ["cat", "/proc/loadavg"], timeout=5.0)
-    parts = raw.split()
-    if len(parts) < 5:
-        return {}
-    return {
-        "load1": parts[0],
-        "load5": parts[1],
-        "load15": parts[2],
-        "running_total_threads": parts[3],
-        "last_pid": parts[4],
-    }
+    return openwrt_service.read_openwrt_loadavg(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def _read_openwrt_conntrack(container: str) -> Dict[str, Any]:
     """Read conntrack counters from OpenWrt /proc/sys/net/netfilter."""
-    out: Dict[str, Any] = {}
-    count_raw = _run_openwrt_cmd(container, ["cat", "/proc/sys/net/netfilter/nf_conntrack_count"], timeout=5.0)
-    max_raw = _run_openwrt_cmd(container, ["cat", "/proc/sys/net/netfilter/nf_conntrack_max"], timeout=5.0)
-    try:
-        if count_raw:
-            out["conntrack_count"] = int(count_raw.splitlines()[-1].strip())
-    except ValueError:
-        pass
-    try:
-        if max_raw:
-            out["conntrack_max"] = int(max_raw.splitlines()[-1].strip())
-    except ValueError:
-        pass
-    return out
+    return openwrt_service.read_openwrt_conntrack(
+        container,
+        run_openwrt_cmd_fn=_run_openwrt_cmd,
+    )
 
 
 def collect_openwrt_raw_metrics(container: str, interfaces: List[str]) -> Dict[str, Any]:
     """Collect raw OpenWrt metrics without local calculations or ping probes."""
-    all_ifaces = _read_openwrt_proc_net_dev(container)
-    if interfaces:
-        iface_map = {iface: all_ifaces.get(iface, {}) for iface in interfaces if iface in all_ifaces}
-    else:
-        iface_map = all_ifaces
-
-    return {
-        "source": "openwrt_container",
-        "container": container,
-        "interfaces": iface_map,
-        "system": {
-            "cpu_stat": _read_openwrt_cpu_stat(container),
-            "meminfo": _read_openwrt_meminfo(container),
-            "uptime": _read_openwrt_uptime(container),
-            "loadavg": _read_openwrt_loadavg(container),
-        },
-        "conntrack": _read_openwrt_conntrack(container),
-    }
+    return openwrt_service.collect_openwrt_raw_metrics(
+        container,
+        interfaces,
+        read_openwrt_proc_net_dev_fn=_read_openwrt_proc_net_dev,
+        read_openwrt_cpu_stat_fn=_read_openwrt_cpu_stat,
+        read_openwrt_meminfo_fn=_read_openwrt_meminfo,
+        read_openwrt_uptime_fn=_read_openwrt_uptime,
+        read_openwrt_loadavg_fn=_read_openwrt_loadavg,
+        read_openwrt_conntrack_fn=_read_openwrt_conntrack,
+    )
 
 
 def parse_prometheus_text(body: str) -> Dict[str, float]:
@@ -332,27 +282,22 @@ def parse_prometheus_text(body: str) -> Dict[str, float]:
         Lines starting with '#' (comments) and invalid lines are skipped.
         If a metric appears multiple times, values are summed.
     """
-    metrics: Dict[str, float] = {}
-    for raw in body.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = PROM_LINE.match(line)
-        if not match:
-            # logger.debug(f"Skipping unparseable prometheus line: {line[:50]}")
-            continue
-        name = match.group("name")
-        try:
-            value = float(match.group("value"))
-            metrics[name] = metrics.get(name, 0.0) + value
-            if name in KPI_KEYS.values():
-                logger.debug(f"KPI Metric Found: {name}={value}")
-        except (ValueError, AttributeError) as e:
-            logger.debug(f"Failed to parse metric value: {e}")
-    return metrics
+    return prometheus_service.parse_prometheus_text(
+        body,
+        prom_line_re=PROM_LINE,
+        kpi_metric_names=set(KPI_KEYS.values()),
+        log_debug_fn=logger.debug,
+    )
 
 
-def fetch_endpoint_metrics(endpoint: Endpoint, timeout: float) -> Dict[str, float]:
+def fetch_endpoint_metrics(
+    endpoint: Endpoint,
+    timeout: float,
+    *,
+    requests_get_fn: Optional[Any] = None,
+    request_attempts: int = 3,
+    backoff_base_s: float = 0.1,
+) -> Dict[str, float]:
     """
     Fetch and parse Prometheus metrics from an endpoint.
     
@@ -369,145 +314,35 @@ def fetch_endpoint_metrics(endpoint: Endpoint, timeout: float) -> Dict[str, floa
         requests.RequestException: If HTTP request fails
         ValueError: If response is not valid Prometheus text format
     """
-    logger.debug(f"Fetching metrics from {endpoint.nf} at {endpoint.url}")
-    try:
-        response = requests.get(endpoint.url, timeout=timeout, verify=True)
-        response.raise_for_status()
-        return parse_prometheus_text(response.text)
-    except requests.Timeout:
-        logger.warning(f"Timeout fetching metrics from {endpoint.nf}")
-        raise
-    except requests.ConnectionError as e:
-        logger.warning(f"Connection failed for {endpoint.nf}: {e}")
-        raise
-    except requests.RequestException as e:
-        logger.warning(f"HTTP error fetching {endpoint.nf}: {e}")
-        raise
+    if requests_get_fn is None:
+        requests_get_fn = requests.get
 
-
-def _ping_host(host: str, timeout: float) -> Tuple[bool, Optional[float], str]:
-    """
-    Ping a host and measure reachability and RTT.
-    
-    Args:
-        host: Hostname or IP to ping
-        timeout: Timeout for ping command in seconds
-        
-    Returns:
-        Tuple of (success: bool, rtt_ms: float or None, output: str)
-    """
-    wait_seconds = str(max(1, int(timeout)))
-    try:
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", wait_seconds, host],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout + 5,  # Give subprocess extra time
-        )
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
-        match = re.search(r"time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms", output)
-        rtt_ms = float(match.group(1)) if match else None
-        return result.returncode == 0, rtt_ms, output.strip()
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Ping subprocess timeout for {host}")
-        return False, None, "Subprocess timeout"
-    except Exception as e:
-        logger.warning(f"Ping failed for {host}: {e}")
-        return False, None, str(e)
-
-
-def _probe_http_openwrt(target: OpenWrtTarget) -> Dict[str, Any]:
-    """
-    Probe OpenWrt HTTP endpoints for reachability.
-    
-    Tries multiple URLs to detect OpenWrt web interface.
-    
-    Args:
-        target: OpenWrtTarget configuration
-        
-    Returns:
-        Dict with 'reachable' bool and optional 'url', 'http_status', 'server' fields
-    """
-    for url in (f"http://{target.host}/cgi-bin/luci/", f"http://{target.host}/"):
-        try:
-            resp = requests.get(url, timeout=target.timeout, allow_redirects=True, verify=True)
-            logger.debug(f"OpenWrt HTTP probe succeeded: {url} -> {resp.status_code}")
-            return {
-                "reachable": True,
-                "url": url,
-                "http_status": resp.status_code,
-                "server": resp.headers.get("Server", ""),
-            }
-        except requests.Timeout:
-            logger.debug(f"OpenWrt HTTP probe timeout: {url}")
-        except requests.ConnectionError as e:
-            logger.debug(f"OpenWrt connection error: {url}: {e}")
-        except requests.RequestException as e:
-            logger.debug(f"OpenWrt HTTP error: {url}: {e}")
-    
-    logger.debug(f"OpenWrt HTTP probe unreachable: {target.host}")
-    return {"reachable": False}
-
-
-def _fetch_luci_sysinfo(target: OpenWrtTarget) -> Dict[str, Any]:
-    """
-    Fetch system info from OpenWrt LuCI RPC.
-    
-    Args:
-        target: OpenWrtTarget with username/password credentials
-        
-    Returns:
-        Dict of system info from LuCI RPC, or empty dict if auth fails
-    """
-    if not target.username or not target.password:
-        return {}
-
-    try:
-        auth_url = f"http://{target.host}/cgi-bin/luci/rpc/auth"
-        login_payload = {"id": 1, "method": "login", "params": [target.username, target.password]}
-        auth_resp = requests.post(auth_url, json=login_payload, timeout=target.timeout, verify=True)
-        auth_resp.raise_for_status()
-        token = (auth_resp.json() or {}).get("result")
-        if not isinstance(token, str) or not token:
-            logger.warning(f"OpenWrt LuCI login failed: no token in response")
-            return {}
-
-        sys_url = f"http://{target.host}/cgi-bin/luci/rpc/sys?auth={token}"
-        sys_payload = {"id": 1, "method": "info", "params": []}
-        sys_resp = requests.post(sys_url, json=sys_payload, timeout=target.timeout, verify=True)
-        sys_resp.raise_for_status()
-        result = (sys_resp.json() or {}).get("result")
-        if isinstance(result, dict):
-            logger.debug(f"OpenWrt LuCI sysinfo retrieved")
-            return result
-        return {}
-    except requests.Timeout:
-        logger.warning(f"OpenWrt LuCI RPC timeout")
-        return {}
-    except requests.RequestException as e:
-        logger.warning(f"OpenWrt LuCI RPC failed: {e}")
-        return {}
-    except Exception as e:
-        logger.warning(f"OpenWrt LuCI parsing error: {e}")
-        return {}
+    return prometheus_service.fetch_endpoint_metrics(
+        endpoint,
+        timeout,
+        requests_get_fn=requests_get_fn,
+        parse_prometheus_text_fn=parse_prometheus_text,
+        requests_timeout_exc=requests.Timeout,
+        requests_connection_exc=requests.ConnectionError,
+        requests_request_exc=requests.RequestException,
+        log_debug_fn=logger.debug,
+        log_warning_fn=logger.warning,
+        request_attempts=request_attempts,
+        backoff_base_s=backoff_base_s,
+        sleep_fn=time.sleep,
+    )
 
 
 def fetch_openwrt_info(target: OpenWrtTarget) -> Tuple[Dict[str, Any], Optional[str]]:
     """
-    Fetch reachability, HTTP, and optional system info from OpenWrt host.
-    
-    Attempts multiple probe methods:
-    1. ICMP ping for reachability and RTT
-    2. HTTP probe to detect web interface
-    3. LuCI RPC login and sysinfo (if credentials provided)
+    Fetch OpenWrt host metadata and available raw interfaces.
     
     Args:
         target: OpenWrtTarget configuration
         
     Returns:
         Tuple of (info_dict, error_string or None)
-        Info dict always contains 'host' and at minimum 'icmp_reachable'
+        Info dict always contains host/container and discovered interfaces (if available)
     """
     info: Dict[str, Any] = {
         "host": target.host,
@@ -537,13 +372,11 @@ def _read_text(path: str) -> str:
         FileNotFoundError: If /proc path does not exist (e.g., container environment)
         IOError: If file cannot be read
     """
-    try:
-        with open(path, "r", encoding="utf-8") as stream:
-            return stream.read()
-    except FileNotFoundError:
-        if "/proc" in path:
-            logger.error(f"Linux /proc not available: {path} (container or non-Linux?)")
-        raise
+    return host_service.read_text(
+        path,
+        open_fn=open,
+        log_error_fn=logger.error,
+    )
 
 
 def _read_proc_net_dev() -> Dict[str, Dict[str, int]]:
@@ -556,39 +389,12 @@ def _read_proc_net_dev() -> Dict[str, Dict[str, int]]:
     Raises:
         FileNotFoundError: If /proc/net/dev not available
     """
-    try:
-        data = _read_text("/proc/net/dev")
-    except FileNotFoundError:
-        logger.error("/proc/net/dev not available")
-        raise
-    
-    out: Dict[str, Dict[str, int]] = {}
-    for line in data.splitlines()[2:]:  # Skip header lines
-        if ":" not in line:
-            continue
-        iface, rest = line.split(":", 1)
-        iface = iface.strip()
-        cols = rest.split()
-        if len(cols) < 16:
-            logger.debug(f"Skipping malformed /proc/net/dev line for {iface}")
-            continue
-        
-        try:
-            out[iface] = {
-                "rx_bytes": int(cols[0]),
-                "rx_packets": int(cols[1]),
-                "rx_errs": int(cols[2]),
-                "rx_drop": int(cols[3]),
-                "tx_bytes": int(cols[8]),
-                "tx_packets": int(cols[9]),
-                "tx_errs": int(cols[10]),
-                "tx_drop": int(cols[11]),
-            }
-        except (ValueError, IndexError) as e:
-            logger.warning(f"Failed to parse /proc/net/dev for {iface}: {e}")
-            continue
-    
-    return out
+    return host_service.read_proc_net_dev(
+        read_text_fn=_read_text,
+        log_error_fn=logger.error,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+    )
 
 
 def _read_cpu_usage_pct(sample_window_s: float = 0.5) -> Optional[float]:
@@ -604,39 +410,13 @@ def _read_cpu_usage_pct(sample_window_s: float = 0.5) -> Optional[float]:
     Returns:
         CPU usage as percentage (0-100), or None if calculation fails
     """
-    def _read_cpu() -> Tuple[int, int]:
-        try:
-            first = _read_text("/proc/stat").splitlines()[0]
-            parts = first.split()
-            values = []
-            for v in parts[1:]:
-                try:
-                    values.append(int(v))
-                except ValueError:
-                    logger.debug(f"Skipping non-integer CPU stat: {v}")
-                    continue
-            if len(values) < 4:
-                raise ValueError(f"Expected at least 4 CPU values, got {len(values)}")
-            idle = values[3] + (values[4] if len(values) > 4 else 0)
-            total = sum(values)
-            return idle, total
-        except Exception as e:
-            logger.warning(f"Failed to read /proc/stat: {e}")
-            raise
-
-    try:
-        idle1, total1 = _read_cpu()
-        time.sleep(max(0.1, sample_window_s))
-        idle2, total2 = _read_cpu()
-        idle_delta = idle2 - idle1
-        total_delta = total2 - total1
-        if total_delta <= 0:
-            logger.warning(f"CPU stat delta invalid: total_delta={total_delta}")
-            return None
-        return (1.0 - (idle_delta / total_delta)) * 100.0
-    except Exception as e:
-        logger.debug(f"CPU usage measurement failed: {e}")
-        return None
+    return host_service.read_cpu_usage_pct(
+        sample_window_s,
+        read_text_fn=_read_text,
+        sleep_fn=time.sleep,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+    )
 
 
 def _read_memory_usage() -> Dict[str, Any]:
@@ -647,37 +427,11 @@ def _read_memory_usage() -> Dict[str, Any]:
         Dict with 'mem_total_kb', 'mem_available_kb', 'mem_used_kb', 'mem_used_pct'
         Returns empty dict if /proc/meminfo unavailable or unparseable.
     """
-    info: Dict[str, int] = {}
-    try:
-        for line in _read_text("/proc/meminfo").splitlines():
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            parts = value.strip().split()
-            if not parts:
-                continue
-            try:
-                info[key] = int(parts[0])
-            except ValueError:
-                logger.debug(f"Skipping non-integer meminfo value: {key}={value}")
-                continue
-    except FileNotFoundError:
-        logger.debug("/proc/meminfo not available")
-        return {}
-    except Exception as e:
-        logger.warning(f"Failed to read /proc/meminfo: {e}")
-        return {}
-
-    total = info.get("MemTotal", 0)
-    available = info.get("MemAvailable", 0)
-    used = max(0, total - available)
-    pct = (used / total * 100.0) if total > 0 else None
-    return {
-        "mem_total_kb": total,
-        "mem_available_kb": available,
-        "mem_used_kb": used,
-        "mem_used_pct": pct,
-    }
+    return host_service.read_memory_usage(
+        read_text_fn=_read_text,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+    )
 
 
 def _read_conntrack_pressure() -> Dict[str, Any]:
@@ -688,34 +442,14 @@ def _read_conntrack_pressure() -> Dict[str, Any]:
         Dict with 'conntrack_count', 'conntrack_max', 'conntrack_usage_pct', 'tcp_established'
         Missing fields are omitted if data unavailable.
     """
-    data: Dict[str, Any] = {}
-    try:
-        count = int(_read_text("/proc/sys/net/netfilter/nf_conntrack_count").strip())
-        maxv = int(_read_text("/proc/sys/net/netfilter/nf_conntrack_max").strip())
-        data["conntrack_count"] = count
-        data["conntrack_max"] = maxv
-        data["conntrack_usage_pct"] = (count / maxv * 100.0) if maxv > 0 else None
-        logger.debug(f"Conntrack: {count}/{maxv}")
-    except FileNotFoundError:
-        logger.debug("Conntrack not available (may not be kernel module loaded)")
-    except (ValueError, IOError) as e:
-        logger.warning(f"Failed to read conntrack: {e}")
-
-    try:
-        result = subprocess.run(["ss", "-s"], capture_output=True, text=True, check=False, timeout=5)
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
-        match = re.search(r"estab\s+(\d+)", output, flags=re.IGNORECASE)
-        if match:
-            data["tcp_established"] = int(match.group(1))
-            logger.debug(f"TCP established: {data['tcp_established']}")
-    except subprocess.TimeoutExpired:
-        logger.warning("ss command timeout")
-    except FileNotFoundError:
-        logger.debug("ss command not available")
-    except Exception as e:
-        logger.warning(f"Failed to read TCP state: {e}")
-    
-    return data
+    return host_service.read_conntrack_pressure(
+        read_text_fn=_read_text,
+        run_cmd_fn=subprocess.run,
+        timeout_exc_cls=subprocess.TimeoutExpired,
+        file_not_found_exc_cls=FileNotFoundError,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+    )
 
 
 def _run_cmd(args: List[str]) -> str:
@@ -728,18 +462,15 @@ def _run_cmd(args: List[str]) -> str:
     Returns:
         Combined stdout and stderr as string
     """
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=10)
-        return ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout running command: {args[0]}")
-        return ""
-    except FileNotFoundError:
-        logger.debug(f"Command not found: {args[0]}")
-        return ""
-    except Exception as e:
-        logger.warning(f"Failed to run command {args[0]}: {e}")
-        return ""
+    return network_service.run_cmd(
+        args,
+        run_cmd_fn=subprocess.run,
+        timeout_exc_cls=subprocess.TimeoutExpired,
+        file_not_found_exc_cls=FileNotFoundError,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+        timeout_s=10,
+    )
 
 
 def _parse_ip_link_detailed(iface: str) -> Dict[str, Any]:
@@ -754,39 +485,11 @@ def _parse_ip_link_detailed(iface: str) -> Dict[str, Any]:
     Returns:
         Dict with 'tx_queue_len' and RX/TX error counters (if present in output)
     """
-    raw = _run_cmd(["ip", "-s", "-s", "link", "show", "dev", iface])
-    out: Dict[str, Any] = {}
-
-    qlen_match = re.search(r"\bqlen\s+(\d+)", raw)
-    if qlen_match:
-        try:
-            out["tx_queue_len"] = int(qlen_match.group(1))
-        except (ValueError, IndexError):
-            logger.debug(f"Failed to parse queue length for {iface}")
-
-    crc_line = re.search(r"RX errors:\s+length\s+crc\s+frame\s+fifo\s+missed\s*\n\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", raw)
-    if crc_line:
-        try:
-            out["rx_err_length"] = int(crc_line.group(1))
-            out["rx_err_crc"] = int(crc_line.group(2))
-            out["rx_err_frame"] = int(crc_line.group(3))
-            out["rx_err_fifo"] = int(crc_line.group(4))
-            out["rx_err_missed"] = int(crc_line.group(5))
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Failed to parse RX errors for {iface}: {e}")
-
-    tx_err_line = re.search(r"TX errors:\s+aborted\s+fifo\s+window\s+heartbeat\s+transns\s*\n\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", raw)
-    if tx_err_line:
-        try:
-            out["tx_err_aborted"] = int(tx_err_line.group(1))
-            out["tx_err_fifo"] = int(tx_err_line.group(2))
-            out["tx_err_window"] = int(tx_err_line.group(3))
-            out["tx_err_heartbeat"] = int(tx_err_line.group(4))
-            out["tx_err_transns"] = int(tx_err_line.group(5))
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Failed to parse TX errors for {iface}: {e}")
-
-    return out
+    return network_service.parse_ip_link_detailed(
+        iface,
+        run_cmd_fn=_run_cmd,
+        log_debug_fn=logger.debug,
+    )
 
 
 def _parse_tc_qdisc(iface: str) -> Dict[str, Any]:
@@ -801,32 +504,11 @@ def _parse_tc_qdisc(iface: str) -> Dict[str, Any]:
     Returns:
         Dict with qdisc statistics (if present in output)
     """
-    raw = _run_cmd(["tc", "-s", "qdisc", "show", "dev", iface])
-    out: Dict[str, Any] = {}
-
-    sent_match = re.search(
-        r"Sent\s+(\d+)\s+bytes\s+(\d+)\s+pkt\s+\(dropped\s+(\d+),\s+overlimits\s+(\d+)\s+requeues\s+(\d+)\)",
-        raw,
+    return network_service.parse_tc_qdisc(
+        iface,
+        run_cmd_fn=_run_cmd,
+        log_debug_fn=logger.debug,
     )
-    if sent_match:
-        try:
-            out["qdisc_sent_bytes"] = int(sent_match.group(1))
-            out["qdisc_sent_packets"] = int(sent_match.group(2))
-            out["qdisc_dropped"] = int(sent_match.group(3))
-            out["qdisc_overlimits"] = int(sent_match.group(4))
-            out["qdisc_requeues"] = int(sent_match.group(5))
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Failed to parse qdisc sent stats for {iface}: {e}")
-
-    backlog_match = re.search(r"backlog\s+(\d+)b\s+(\d+)p", raw)
-    if backlog_match:
-        try:
-            out["qdisc_backlog_bytes"] = int(backlog_match.group(1))
-            out["qdisc_backlog_packets"] = int(backlog_match.group(2))
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Failed to parse qdisc backlog for {iface}: {e}")
-
-    return out
 
 
 def _ping_stats(host: str, count: int, timeout_s: float) -> Dict[str, Any]:
@@ -843,51 +525,15 @@ def _ping_stats(host: str, count: int, timeout_s: float) -> Dict[str, Any]:
         'ping_rtt_min_ms', 'ping_rtt_avg_ms', 'ping_rtt_max_ms', 'ping_jitter_ms'
         (missing fields omitted if ping fails or stats unavailable)
     """
-    count = max(1, count)
-    timeout_s = max(1, int(timeout_s))
-    try:
-        result = subprocess.run(
-            ["ping", "-c", str(count), "-W", str(timeout_s), host],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout_s + 10,
-        )
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Ping subprocess timeout for {host}")
-        return {"target": host, "ping_success": False}
-    except Exception as e:
-        logger.warning(f"Ping failed for {host}: {e}")
-        return {"target": host, "ping_success": False}
-    
-    data: Dict[str, Any] = {
-        "target": host,
-        "ping_success": result.returncode == 0,
-    }
-
-    try:
-        txrx = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
-        if txrx:
-            tx = int(txrx.group(1))
-            rx = int(txrx.group(2))
-            data["ping_tx_packets"] = tx
-            data["ping_rx_packets"] = rx
-            data["ping_loss_pct"] = ((tx - rx) / tx * 100.0) if tx > 0 else None
-    except (ValueError, IndexError) as e:
-        logger.debug(f"Failed to parse ping tx/rx for {host}: {e}")
-
-    try:
-        rtt = re.search(r"rtt [^=]+= ([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+) ms", output)
-        if rtt:
-            data["ping_rtt_min_ms"] = float(rtt.group(1))
-            data["ping_rtt_avg_ms"] = float(rtt.group(2))
-            data["ping_rtt_max_ms"] = float(rtt.group(3))
-            data["ping_jitter_ms"] = float(rtt.group(4))
-    except (ValueError, IndexError) as e:
-        logger.debug(f"Failed to parse ping RTT for {host}: {e}")
-
-    return data
+    return network_service.ping_stats(
+        host,
+        count,
+        timeout_s,
+        run_cmd_fn=subprocess.run,
+        timeout_exc_cls=subprocess.TimeoutExpired,
+        log_warning_fn=logger.warning,
+        log_debug_fn=logger.debug,
+    )
 
 
 def collect_network_kpis(cfg: NetworkKpiConfig) -> Dict[str, Any]:
@@ -903,16 +549,10 @@ def collect_network_kpis(cfg: NetworkKpiConfig) -> Dict[str, Any]:
         Dict with 'network' (interfaces, throughput, ping stats) and 'system' / 'conntrack' sections
         Missing sections (e.g., if /proc unavailable) are gracefully omitted.
     """
-    raw = collect_openwrt_raw_metrics(cfg.openwrt_container, cfg.interfaces)
-    return {
-        "network": {
-            "source": raw.get("source", "openwrt_container"),
-            "container": raw.get("container", cfg.openwrt_container),
-            "interfaces": raw.get("interfaces", {}),
-        },
-        "system": raw.get("system", {}),
-        "conntrack": raw.get("conntrack", {}),
-    }
+    return openwrt_service.collect_network_kpis(
+        cfg,
+        collect_openwrt_raw_metrics_fn=collect_openwrt_raw_metrics,
+    )
 
 
 def collect_all(endpoints: Iterable[Endpoint], timeout: float) -> Tuple[Dict[str, Dict[str, float]], Dict[str, str]]:
@@ -928,18 +568,38 @@ def collect_all(endpoints: Iterable[Endpoint], timeout: float) -> Tuple[Dict[str
         - per_nf_metrics: Dict mapping NF name to metrics dict
         - errors: Dict mapping NF name to error string if fetch failed
     """
-    per_nf: Dict[str, Dict[str, float]] = {}
-    errors: Dict[str, str] = {}
-    for endpoint in endpoints:
-        try:
-            metrics = fetch_endpoint_metrics(endpoint, timeout)
-            per_nf[endpoint.nf] = metrics
-            logger.info(f"Scraped {len(metrics)} metrics from {endpoint.nf}")
-        except Exception as exc:
-            err_msg = f"{type(exc).__name__}: {exc}"
-            errors[endpoint.nf] = err_msg
-            logger.warning(f"Failed to scrape {endpoint.nf}: {err_msg}")
-    return per_nf, errors
+    endpoint_list = list(endpoints)
+    if not endpoint_list:
+        return {}, {}
+
+    max_workers = min(8, max(1, len(endpoint_list)))
+    session = prometheus_service.build_retrying_session(pool_maxsize=max_workers)
+
+    try:
+        def _fetch_with_shared_session(endpoint: Endpoint, req_timeout: float) -> Dict[str, float]:
+            return fetch_endpoint_metrics(
+                endpoint,
+                req_timeout,
+                requests_get_fn=session.get,
+            )
+
+        return prometheus_service.collect_all(
+            endpoint_list,
+            timeout,
+            fetch_endpoint_metrics_fn=_fetch_with_shared_session,
+            log_info_fn=logger.info,
+            log_warning_fn=logger.warning,
+            max_workers=max_workers,
+        )
+    finally:
+        _close_session_if_possible(session)
+
+
+def _close_session_if_possible(session: Any) -> None:
+    """Best-effort close for request sessions."""
+    close_fn = getattr(session, "close", None)
+    if callable(close_fn):
+        close_fn()
 
 
 def summarize_kpis(per_nf: Dict[str, Dict[str, float]]) -> Dict[str, float]:
@@ -956,19 +616,7 @@ def summarize_kpis(per_nf: Dict[str, Dict[str, float]]) -> Dict[str, float]:
     Returns:
         Dict of aggregated KPI values with aliases as keys
     """
-    merged: Dict[str, float] = {}
-    for nf_metrics in per_nf.values():
-        for metric_name, value in nf_metrics.items():
-            merged[metric_name] = merged.get(metric_name, 0.0) + value
-
-    summary: Dict[str, float] = {}
-    for alias, metric_name in KPI_KEYS.items():
-        summary[alias] = merged.get(metric_name, 0.0)
-
-    req = summary.get("amf_reg_init_req", 0.0)
-    succ = summary.get("amf_reg_init_succ", 0.0)
-    summary["amf_reg_success_rate_pct"] = (succ / req * 100.0) if req > 0 else 0.0
-    return summary
+    return prometheus_service.summarize_kpis(per_nf, kpi_keys=KPI_KEYS)
 
 
 def extract_raw_metrics(per_nf: Dict[str, Dict[str, float]], metric_names: Optional[str]) -> Dict[str, float]:
@@ -978,16 +626,7 @@ def extract_raw_metrics(per_nf: Dict[str, Dict[str, float]], metric_names: Optio
     If metric_names is empty or None, returns all metrics from all NFs.
     Otherwise, filters to only requested metric names.
     """
-    merged: Dict[str, float] = {}
-    for nf_metrics in per_nf.values():
-        for metric_name, value in nf_metrics.items():
-            merged[metric_name] = merged.get(metric_name, 0.0) + value
-    
-    if not metric_names or not metric_names.strip():
-        return merged
-    
-    requested = set(name.strip() for name in metric_names.split(",") if name.strip())
-    return {k: v for k, v in merged.items() if k in requested}
+    return prometheus_service.extract_raw_metrics(per_nf, metric_names)
 
 
 def print_human(
@@ -1010,62 +649,31 @@ def print_human(
         openwrt_error: OpenWrt probe error message (if any)
         network_kpi: Network and system KPI dict
     """
-    print("Open5GS KPI Snapshot")
-    print("=" * 60)
-    print("Endpoints")
-    for endpoint in endpoints:
-        print(f"- {endpoint.nf:>4}: {endpoint.url}")
-
-    print("\nKPIs")
-    for key in sorted(summary.keys()):
-        val = summary[key]
-        if key.endswith("_pct"):
-            print(f"- {key:30s}: {val:8.2f}")
-        elif abs(val - int(val)) < 1e-9:
-            print(f"- {key:30s}: {int(val)}")
-        else:
-            print(f"- {key:30s}: {val:.4f}")
-
-    if raw_metrics:
-        print("\nRaw Metrics")
-        for key in sorted(raw_metrics.keys()):
-            val = raw_metrics[key]
-            if abs(val - int(val)) < 1e-9:
-                print(f"- {key:40s}: {int(val)}")
-            else:
-                print(f"- {key:40s}: {val:.4f}")
-
-    if openwrt:
-        print("\nOpenWrt")
-        for key in sorted(openwrt.keys()):
-            value = openwrt[key]
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value, sort_keys=True)
-            print(f"- {key:30s}: {value}")
-
-    if network_kpi:
-        print("\nNetwork/System KPIs")
-        print(json.dumps(network_kpi, indent=2, sort_keys=True))
-
-    if errors:
-        print("\nErrors")
-        for nf, err in errors.items():
-            print(f"- {nf}: {err}")
-            logger.error(f"Collection error [{nf}]: {err}")
-    if openwrt_error:
-        print("\nOpenWrt Error")
-        print(f"- {openwrt_error}")
-        logger.warning(f"OpenWrt probe error: {openwrt_error}")
+    output_service.print_human(
+        endpoints,
+        summary,
+        errors,
+        openwrt,
+        openwrt_error,
+        network_kpi,
+        raw_metrics,
+        printer=print,
+        json_dumps_fn=json.dumps,
+        log_error_fn=logger.error,
+        log_warning_fn=logger.warning,
+    )
 
 
 def parse_args() -> argparse.Namespace:
     """Parse and validate command-line arguments."""
+    initialize_environment()
+
     parser = argparse.ArgumentParser(
         description="Fetch KPI snapshot from Open5GS metrics endpoints",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment Variables:
-  OPENWRT_PASSWORD      OpenWrt LuCI RPC password (more secure than --openwrt-password)
+    OPENWRT_PASSWORD      Reserved compatibility option (currently unused in raw-only mode)
   METRICS_ENDPOINTS     Comma-separated list of metrics endpoints config
 
 Examples:
@@ -1095,13 +703,13 @@ Examples:
     parser.add_argument("--json", action="store_true", help="Output JSON instead of human-readable")
     parser.add_argument(
         "--watch",
-        type=int,
-        default=int(os.environ.get("WATCH_INTERVAL", 0)),
+        type=_non_negative_int,
+        default=_env_non_negative_int("WATCH_INTERVAL", default=0),
         help="Poll interval seconds (0 = once, default: 0)",
     )
     parser.add_argument(
         "--server",
-        type=int,
+        type=_non_negative_int,
         default=0,
         help="Start HTTP server on PORT (e.g., 8080). Incompatible with --watch",
     )
@@ -1115,7 +723,7 @@ Examples:
         "--openwrt-timeout",
         type=_positive_float,
         default=float(os.environ.get("OPENWRT_TIMEOUT", 2.0)),
-        help="OpenWrt probe timeout seconds (default: 2.0)",
+        help="OpenWrt collection timeout seconds (default: 2.0)",
     )
     parser.add_argument(
         "--openwrt-container",
@@ -1125,12 +733,12 @@ Examples:
     parser.add_argument(
         "--openwrt-user",
         default=os.environ.get("OPENWRT_USER", ""),
-        help="OpenWrt LuCI RPC username (optional)",
+        help="Reserved for future OpenWrt auth integrations (currently unused)",
     )
     parser.add_argument(
         "--openwrt-password",
         default=os.environ.get("OPENWRT_PASSWORD", ""),
-        help="OpenWrt LuCI RPC password (DEPRECATED: use OPENWRT_PASSWORD env var instead)",
+        help="Reserved for future OpenWrt auth integrations (currently unused)",
     )
     parser.add_argument(
         "--no-openwrt",
@@ -1144,9 +752,9 @@ Examples:
     )
     parser.add_argument(
         "--steer-interval",
-        type=int,
-        default=int(os.environ.get("STEER_INTERVAL")) if os.environ.get("STEER_INTERVAL") else None,
-        help="Trigger automated traffic steering every N seconds (default: None)",
+        type=_non_negative_int,
+        default=_env_optional_non_negative_int("STEER_INTERVAL"),
+        help="Trigger automated traffic steering every N seconds (0 disables, default: None)",
     )
     parser.add_argument(
         "--steer-script",
@@ -1160,30 +768,15 @@ Examples:
     )
 
     args = parser.parse_args()
-
-    # Validation: --server and --watch are mutually exclusive
-    if args.server and args.watch:
-        parser.error("--server and --watch cannot be used together")
-
-    # Set logging level based on flags
-    if args.debug:
-        logger.setLevel(logging.DEBUG)
-    
-    # Read password from env var if not provided via CLI
-    if not args.openwrt_password:
-        args.openwrt_password = os.environ.get("OPENWRT_PASSWORD", "")
-    elif os.environ.get("OPENWRT_PASSWORD"):
-        logger.warning("OPENWRT_PASSWORD env var is set but --openwrt-password CLI arg takes precedence")
-
-    # Resolve default script path if not provided
-    if not getattr(args, "steer_script", None):
-        default_script = Path(__file__).parent.parent / "scripts" / "toggle_route.sh"
-        if default_script.exists():
-            args.steer_script = str(default_script.resolve())
-        else:
-            args.steer_script = "/home/test-bed/test-bed/groupStudies/scripts/toggle_route.sh"
-
-    return args
+    return config_service.finalize_parsed_args(
+        args,
+        parser_error_fn=parser.error,
+        env_get_fn=os.environ.get,
+        set_log_level_fn=logger.setLevel,
+        debug_level=logging.DEBUG,
+        log_warning_fn=logger.warning,
+        app_file_path=__file__,
+    )
 
 
 def run_steering_script(script_path: str) -> None:
@@ -1193,38 +786,47 @@ def run_steering_script(script_path: str) -> None:
     Args:
         script_path: Absolute path to toggle_route.sh
     """
-    logger.info(f"Triggering traffic steering: {script_path}")
-    try:
-        # Check if file exists and is executable
-        if not os.path.exists(script_path):
-            logger.error(f"Steering script not found: {script_path}")
-            return
+    runtime_service.run_steering_script(
+        script_path,
+        path_exists_fn=os.path.exists,
+        run_cmd_fn=subprocess.run,
+        printer=print,
+        log_info_fn=logger.info,
+        log_error_fn=logger.error,
+        timeout_exception_cls=subprocess.TimeoutExpired,
+        timeout_s=15,
+    )
 
-        result = subprocess.run(
-            ["bash", script_path],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-        
-        output = (result.stdout or "").strip()
-        error = (result.stderr or "").strip()
-        
-        if output:
-            print("\n" + "=" * 20 + " STEERING OUTPUT " + "=" * 20)
-            print(output)
-            print("=" * 57 + "\n")
-            
-        if result.returncode != 0:
-            logger.error(f"Steering script failed (exit {result.returncode}): {error}")
-        else:
-            logger.info("Traffic steering switch completed successfully")
-            
-    except subprocess.TimeoutExpired:
-        logger.error(f"Traffic steering script timed out after 15s")
-    except Exception as e:
-        logger.error(f"Failed to execute steering script: {e}")
+
+def collect_snapshot(args: argparse.Namespace, endpoints: List[Endpoint]) -> Dict[str, Any]:
+    """Collect one complete KPI snapshot for CLI and HTTP server paths."""
+    return snapshot_service.collect_snapshot(
+        args,
+        endpoints,
+        collect_all_fn=collect_all,
+        summarize_kpis_fn=summarize_kpis,
+        extract_raw_metrics_fn=extract_raw_metrics,
+        collect_network_kpis_fn=collect_network_kpis,
+        network_kpi_config_cls=NetworkKpiConfig,
+        fetch_openwrt_info_fn=fetch_openwrt_info,
+        openwrt_target_cls=OpenWrtTarget,
+        log_warning_fn=logger.warning,
+        now_fn=time.time,
+    )
+
+
+def _build_config_error_payload(message: str, invalid_endpoints: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Build a consistent payload for configuration-related errors."""
+    return snapshot_service.build_config_error_payload(
+        message,
+        invalid_endpoints=invalid_endpoints,
+        now_fn=time.time,
+    )
+
+
+def _build_runtime_error_payload(message: str) -> Dict[str, Any]:
+    """Build a consistent payload for runtime collection failures."""
+    return snapshot_service.build_runtime_error_payload(message, now_fn=time.time)
 
 
 def create_http_server(args: argparse.Namespace) -> "Flask":
@@ -1244,79 +846,17 @@ def create_http_server(args: argparse.Namespace) -> "Flask":
         raise RuntimeError(
             "Flask is required for --server mode. Install with: pip install flask"
         )
-    
-    app = Flask(__name__)
-    endpoints_cache: Dict[str, Any] = {}
-    
-    def collect_kpi_snapshot() -> Dict[str, Any]:
-        """Collect fresh KPI snapshot."""
-        try:
-            endpoints = endpoints_cache.get("endpoints", [])
-            if not endpoints:
-                endpoints = _parse_manual_endpoints(args.metrics_endpoints)
-                endpoints_cache["endpoints"] = endpoints
-            
-            per_nf, errors = collect_all(endpoints, timeout=args.timeout)
-            summary = summarize_kpis(per_nf)
-            raw_metrics = extract_raw_metrics(per_nf, "" if not hasattr(args, 'raw_metrics') else args.raw_metrics)
-            
-            interfaces = [item.strip() for item in args.ifaces.split(",") if item.strip()]
-            try:
-                network_kpi = collect_network_kpis(
-                    NetworkKpiConfig(
-                        interfaces=interfaces,
-                        openwrt_container=args.openwrt_container,
-                    )
-                )
-            except Exception as e:
-                logger.warning(f"Network KPI collection failed: {e}")
-                network_kpi = {}
-            
-            openwrt: Dict[str, Any] = {}
-            openwrt_error: Optional[str] = None
-            if not args.no_openwrt and args.openwrt_host:
-                target = OpenWrtTarget(
-                    host=args.openwrt_host,
-                    timeout=args.openwrt_timeout,
-                    container=args.openwrt_container,
-                    username=args.openwrt_user,
-                    password=args.openwrt_password,
-                )
-                openwrt, openwrt_error = fetch_openwrt_info(target)
-            
-            payload = {
-                "timestamp": int(time.time()),
-                "kpi": summary,
-                "raw_metrics": raw_metrics,
-                "network_kpi": network_kpi,
-                "errors": errors,
-                "openwrt": openwrt,
-            }
-            if openwrt_error:
-                payload["openwrt_error"] = openwrt_error
-            
-            return payload
-        except Exception as e:
-            logger.error(f"KPI collection failed: {e}", exc_info=True)
-            return {
-                "timestamp": int(time.time()),
-                "error": str(e),
-                "kpi": {},
-                "errors": {"collection": str(e)},
-            }
-    
-    @app.route("/health")
-    def health() -> Dict[str, str]:
-        """Health check endpoint."""
-        return {"status": "ok"}
-    
-    @app.route("/kpi")
-    def kpi() -> Dict[str, Any]:
-        """KPI metrics endpoint (JSON)."""
-        payload = collect_kpi_snapshot()
-        return jsonify(payload)
-    
-    return app
+
+    return server_service.create_http_server_app(
+        args,
+        flask_cls=Flask,
+        jsonify_fn=jsonify,
+        parse_manual_endpoints_with_errors_fn=_parse_manual_endpoints_with_errors,
+        collect_snapshot_fn=collect_snapshot,
+        build_config_error_payload_fn=_build_config_error_payload,
+        build_runtime_error_payload_fn=_build_runtime_error_payload,
+        log_error_fn=logger.error,
+    )
 
 
 def run_http_server(args: argparse.Namespace, port: int) -> int:
@@ -1330,51 +870,35 @@ def run_http_server(args: argparse.Namespace, port: int) -> int:
     Returns:
         Exit code (0 = clean shutdown, 1 = error)
     """
-    logger.info(f"Starting HTTP server on port {port}")
-    logger.info("Endpoints:")
-    logger.info(f"  /health  - Health check")
-    logger.info(f"  /kpi     - KPI metrics (JSON)")
-    
-    try:
-        app = create_http_server(args)
-        # Disable Flask's default logging (too verbose)
-        flask_logger = logging.getLogger("werkzeug")
-        flask_logger.setLevel(logging.WARNING)
-        
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-        return 0
-    except KeyboardInterrupt:
-        logger.info("HTTP server interrupted")
-        return 0
-    except Exception as e:
-        logger.error(f"HTTP server failed: {e}", exc_info=True)
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    return server_service.run_http_server(
+        args,
+        port,
+        create_http_server_fn=create_http_server,
+        get_logger_fn=logging.getLogger,
+        warning_level=logging.WARNING,
+        log_info_fn=logger.info,
+        log_error_fn=logger.error,
+        print_error_fn=lambda message: print(message, file=sys.stderr),
+    )
+
+
+def _parse_manual_endpoints_with_errors(endpoints_str: Optional[str]) -> Tuple[List[Endpoint], List[str]]:
+    """Parse comma-separated host:port list and return (valid_endpoints, invalid_tokens)."""
+    endpoints, invalid = config_service.parse_manual_endpoints_with_errors(
+        endpoints_str,
+        endpoint_cls=Endpoint,
+        log_warning_fn=logger.warning,
+    )
+    return endpoints, invalid
 
 
 def _parse_manual_endpoints(endpoints_str: Optional[str]) -> List[Endpoint]:
     """Parse comma-separated host:port list into Endpoint objects."""
-    endpoints: List[Endpoint] = []
-    if not endpoints_str:
-        return endpoints
-    for ep_str in endpoints_str.split(","):
-        ep_str = ep_str.strip()
-        if not ep_str:
-            continue
-        
-        # Extract IP and Port for labelling
-        ip = ep_str.split(":")[0]
-        port = ep_str.split(":")[1] if ":" in ep_str else "9090"
-        nf_label = f"custom-{ip}-{port}"
-
-        if ":" in ep_str:
-            try:
-                host, port = ep_str.rsplit(":", 1)
-                endpoints.append(Endpoint(nf=nf_label, address=host, port=int(port)))
-            except ValueError:
-                logger.warning(f"Invalid endpoint format: {ep_str}")
-        else:
-            endpoints.append(Endpoint(nf=nf_label, address=ep_str, port=9090))
+    endpoints = config_service.parse_manual_endpoints(
+        endpoints_str,
+        endpoint_cls=Endpoint,
+        log_warning_fn=logger.warning,
+    )
     return endpoints
 
 
@@ -1388,7 +912,11 @@ def main() -> int:
     Returns:
         Exit code (0: success, 3: no endpoints, 1: unhandled exception)
     """
-    args = parse_args()
+    try:
+        args = parse_args()
+    except SystemExit as exc:
+        code = exc.code
+        return code if isinstance(code, int) else 1
 
     logger.info("=" * 60)
     logger.info("Open5GS KPI Collection Tool")
@@ -1411,11 +939,16 @@ def main() -> int:
             logger.warning(f"Failed to auto-discover OpenWrt interfaces: {e}")
 
     # 1. Manual Endpoints (e.g. from .env or CLI)
-    endpoints = _parse_manual_endpoints(args.metrics_endpoints)
-    if endpoints:
-        logger.info(f"Using {len(endpoints)} metrics endpoints")
-    else:
-        logger.warning("No metrics endpoints configured. Open5GS metrics will be skipped.")
+    endpoints, invalid_endpoints = _parse_manual_endpoints_with_errors(args.metrics_endpoints)
+    if invalid_endpoints and not endpoints:
+        logger.error(
+            f"Invalid metrics endpoint configuration: {', '.join(invalid_endpoints)}"
+        )
+        return 2
+    if not endpoints:
+        logger.error("No metrics endpoints discovered")
+        return 3
+    logger.info(f"Using {len(endpoints)} metrics endpoints")
 
     # Handle HTTP server mode
     if args.server:
@@ -1452,53 +985,26 @@ def main() -> int:
                     last_steer_time = now
 
             try:
-                per_nf, errors = collect_all(endpoints, timeout=args.timeout)
-                summary = summarize_kpis(per_nf)
-                raw_metrics = extract_raw_metrics(per_nf, args.raw_metrics)
-                
-                interfaces = [item.strip() for item in args.ifaces.split(",") if item.strip()]
-                try:
-                    network_kpi = collect_network_kpis(
-                        NetworkKpiConfig(
-                            interfaces=interfaces,
-                            openwrt_container=args.openwrt_container,
-                        )
-                    )
-                except Exception as e:
-                    logger.warning(f"Network KPI collection failed: {e}")
-                    network_kpi = {}
-
-                openwrt: Dict[str, Any] = {}
-                openwrt_error: Optional[str] = None
-                if not args.no_openwrt and args.openwrt_host:
-                    target = OpenWrtTarget(
-                        host=args.openwrt_host,
-                        timeout=args.openwrt_timeout,
-                        container=args.openwrt_container,
-                        username=args.openwrt_user,
-                        password=args.openwrt_password,
-                    )
-                    openwrt, openwrt_error = fetch_openwrt_info(target)
-
-                payload = {
-                    "timestamp": int(time.time()),
-                    "kpi": summary,
-                    "raw_metrics": raw_metrics,
-                    "network_kpi": network_kpi,
-                    "errors": errors,
-                    "openwrt": openwrt,
-                }
-                if openwrt_error:
-                    payload["openwrt_error"] = openwrt_error
+                payload = collect_snapshot(args, endpoints)
 
                 if args.json:
                     try:
                         print(json.dumps(payload, indent=2, sort_keys=True))
                     except (TypeError, ValueError) as e:
-                        logger.error(f"Failed to serialize JSON: {e}")
+                        logger.error(f"[{ERROR_CATEGORY_SERIALIZATION}] Failed to serialize JSON: {e}")
                         print(f"Error: JSON serialization failed: {e}", file=sys.stderr)
+                        if args.watch <= 0:
+                            return 1
                 else:
-                    print_human(endpoints, summary, errors, openwrt, openwrt_error, network_kpi, raw_metrics)
+                    print_human(
+                        endpoints,
+                        payload.get("kpi", {}),
+                        payload.get("errors", {}),
+                        payload.get("openwrt", {}),
+                        payload.get("openwrt_error"),
+                        payload.get("network_kpi", {}),
+                        payload.get("raw_metrics", {}),
+                    )
 
                 if args.watch <= 0:
                     break
@@ -1536,13 +1042,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Try loading .env before main starts
-    try:
-        from dotenv import load_dotenv
-        env_path = Path(__file__).resolve().parent / ".env"
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-    except ImportError:
-        pass
-        
+    initialize_environment()
     raise SystemExit(main())

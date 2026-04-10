@@ -68,7 +68,7 @@ python app.py --watch 5 --steer-interval 5 --steer-script ./scripts/toggle_route
 | `--no-openwrt` | Disable OpenWrt probing entirely. |
 | `--debug` | Enable debug logging to `stderr`. |
 
-*Note: The `--openwrt-password` CLI argument is deprecated. Use the `OPENWRT_PASSWORD` environment variable instead.*
+*Note: OpenWrt auth options (`--openwrt-user`, `--openwrt-password`, `OPENWRT_USER`, `OPENWRT_PASSWORD`) are currently reserved and unused in raw-only mode.*
 
 ## Environment Variables
 
@@ -81,10 +81,10 @@ The application can read configuration from a `.env` file in the working directo
 - `OPENWRT_HOST`: OpenWrt host/IP (default: 192.168.142.200).
 - `OPENWRT_TIMEOUT`: OpenWrt probe timeout seconds (default: 2.0).
 - `OPENWRT_CONTAINER`: OpenWrt Docker container name (default: openwrt_router).
-- `OPENWRT_USER`: OpenWrt LuCI RPC username (optional).
-- `OPENWRT_PASSWORD`: OpenWrt LuCI RPC password.
+- `OPENWRT_USER`: Reserved for future OpenWrt auth integrations (currently unused).
+- `OPENWRT_PASSWORD`: Reserved for future OpenWrt auth integrations (currently unused).
 - `OPENWRT_IFACES`: Comma-separated OpenWrt interfaces to include (default: eth0,eth1,br-lan,lo).
-- `STEER_INTERVAL`: Trigger automated traffic steering every N seconds.
+- `STEER_INTERVAL`: Trigger automated traffic steering every N seconds (`0` disables steering).
 - `STEER_SCRIPT`: Path to traffic steering script.
 
 ## Metrics Summary
