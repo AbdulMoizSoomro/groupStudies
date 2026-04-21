@@ -112,7 +112,7 @@ make -j`nproc`
 2. Using Docker container, we can setup the oran sc ric
 ```bash
 git clone https://github.com/AbdulMoizSoomro/group-studies-oran-sc-ric
-cd ./oran-sc-ric
+cd ./group-studies-oran-sc-ric
 docker compose up
 ```
 
